@@ -544,3 +544,67 @@ public sealed class RepositoryTests : IDisposable
         _connection.Dispose();
     }
 }
+
+
+---------------------------
+
+
+----------------------------
+
+using Capstone.DAL.Models;
+using Microsoft.EntityFrameworkCore;
+
+namespace Capstone.DAL.Repository;
+
+public class HelpDeskDbContext : DbContext
+{
+    public HelpDeskDbContext(DbContextOptions<HelpDeskDbContext> options)
+        : base(options)
+    {
+    }
+
+    public DbSet<Role> Roles => Set<Role>();
+    public DbSet<User> Users => Set<User>();
+    public DbSet<Status> Statuses => Set<Status>();
+    public DbSet<ServiceRequest> ServiceRequests => Set<ServiceRequest>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+
+        modelBuilder.Entity<Role>().ToTable("Role");
+        modelBuilder.Entity<User>().ToTable("User");
+        modelBuilder.Entity<Status>().ToTable("Status");
+        modelBuilder.Entity<ServiceRequest>().ToTable("ServiceRequest");
+
+        modelBuilder.Entity<User>()
+            .HasOne(u => u.Role)
+            .WithMany()
+            .HasForeignKey(u => u.RoleId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<ServiceRequest>()
+            .HasOne(sr => sr.RaisedByUser)
+            .WithMany()
+            .HasForeignKey(sr => sr.RaisedBy)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<ServiceRequest>()
+            .HasOne(sr => sr.Status)
+            .WithMany()
+            .HasForeignKey(sr => sr.ReqStatus)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<Role>().HasData(
+            new Role { RoleId = 1, RoleName = "Admin" },
+            new Role { RoleId = 2, RoleName = "User" }
+        );
+
+        modelBuilder.Entity<Status>().HasData(
+            new Status { StatusId = 1, Description = "Open" },
+            new Status { StatusId = 2, Description = "In Progress" },
+            new Status { StatusId = 3, Description = "Closed" },
+            new Status { StatusId = 4, Description = "Re-Opened" }
+        );
+    }
+}
