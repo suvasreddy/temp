@@ -608,3 +608,28 @@ public class HelpDeskDbContext : DbContext
         );
     }
 }
+
+
+-----
+
+[Fact]
+public async Task SaveChangesAsync_WhenDeletingReferencedRole_ShouldThrowDbUpdateExceptionDueToRestrict()
+{
+    User user = new()
+    {
+        UserName = "bob",
+        Password = "Password123",
+        CreatedOn = DateTime.UtcNow,
+        RoleId = 2
+    };
+    _context.Users.Add(user);
+    await _context.SaveChangesAsync();
+
+    // Detach tracked user so EF Core sends DELETE to SQLite on SaveChangesAsync
+    _context.Entry(user).State = EntityState.Detached;
+
+    Role role = await _context.Roles.FirstAsync(r => r.RoleId == 2);
+    _context.Roles.Remove(role);
+
+    await Assert.ThrowsAsync<DbUpdateException>(() => _context.SaveChangesAsync());
+}
