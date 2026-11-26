@@ -1,0 +1,311 @@
+// ============================================================================
+// FILE 1: Capstone.DAL/Repository/IRepository.cs
+// ============================================================================
+using Capstone.DAL.Models;
+
+namespace Capstone.DAL.Repository;
+
+public interface IRepository
+{
+    Task<bool> AuthenticateAsync(User user);
+    Task<User?> GetUserAsync(string userName);
+    Task<ServiceRequest> RaiseRequestAsync(ServiceRequest request);
+    Task<IEnumerable<ServiceRequest>> ViewRequestsAsync(string? userName = null);
+    Task<ServiceRequest?> GetRequestByIdAsync(int requestId);
+    Task<bool> ReOpenRequestAsync(int requestId);
+    Task<bool> CloseRequestAsync(int requestId);
+    Task<bool> DeleteRequestAsync(int requestId);
+    Task<Dictionary<string, int>> GetSummaryRequestByUserAsync(string userName);
+}
+
+// ============================================================================
+// FILE 2: Capstone.DAL/Repository/Repository.cs
+// ============================================================================
+using Capstone.DAL.Models;
+using Microsoft.EntityFrameworkCore;
+
+namespace Capstone.DAL.Repository;
+
+public class Repository : IRepository
+{
+    private readonly HelpDeskDbContext _context;
+
+    public Repository(HelpDeskDbContext context)
+    {
+        _context = context;
+    }
+
+    public async Task<bool> AuthenticateAsync(User user)
+    {
+        if (string.IsNullOrWhiteSpace(user.UserName) || string.IsNullOrWhiteSpace(user.Password))
+        {
+            return false;
+        }
+
+        return await _context.Users
+            .AsNoTracking()
+            .AnyAsync(u => u.UserName == user.UserName && u.Password == user.Password);
+    }
+
+    public async Task<User?> GetUserAsync(string userName)
+    {
+        return await _context.Users
+            .AsNoTracking()
+            .Include(u => u.Role)
+            .FirstOrDefaultAsync(u => u.UserName == userName);
+    }
+
+    public async Task<ServiceRequest> RaiseRequestAsync(ServiceRequest request)
+    {
+        request.RaisedOn = DateTime.UtcNow;
+        if (request.ReqStatus == 0)
+        {
+            request.ReqStatus = 1;
+        }
+
+        _context.ServiceRequests.Add(request);
+        await _context.SaveChangesAsync();
+        return request;
+    }
+
+    public async Task<IEnumerable<ServiceRequest>> ViewRequestsAsync(string? userName = null)
+    {
+        var query = _context.ServiceRequests
+            .AsNoTracking()
+            .Include(sr => sr.RaisedByUser)
+            .ThenInclude(u => u!.Role)
+            .Include(sr => sr.Status)
+            .AsQueryable();
+
+        if (!string.IsNullOrWhiteSpace(userName))
+        {
+            query = query.Where(sr => sr.RaisedBy == userName);
+        }
+
+        return await query.OrderByDescending(sr => sr.RaisedOn).ToListAsync();
+    }
+
+    public async Task<ServiceRequest?> GetRequestByIdAsync(int requestId)
+    {
+        return await _context.ServiceRequests
+            .AsNoTracking()
+            .Include(sr => sr.RaisedByUser)
+            .ThenInclude(u => u!.Role)
+            .Include(sr => sr.Status)
+            .FirstOrDefaultAsync(sr => sr.RequestId == requestId);
+    }
+
+    public async Task<bool> ReOpenRequestAsync(int requestId)
+    {
+        var request = await _context.ServiceRequests.FindAsync(requestId);
+        if (request is null)
+        {
+            return false;
+        }
+
+        request.ReqStatus = 4;
+        await _context.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task<bool> CloseRequestAsync(int requestId)
+    {
+        var request = await _context.ServiceRequests.FindAsync(requestId);
+        if (request is null)
+        {
+            return false;
+        }
+
+        request.ReqStatus = 3;
+        await _context.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task<bool> DeleteRequestAsync(int requestId)
+    {
+        var request = await _context.ServiceRequests.FindAsync(requestId);
+        if (request is null)
+        {
+            return false;
+        }
+
+        _context.ServiceRequests.Remove(request);
+        await _context.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task<Dictionary<string, int>> GetSummaryRequestByUserAsync(string userName)
+    {
+        return await _context.ServiceRequests
+            .AsNoTracking()
+            .Where(sr => sr.RaisedBy == userName)
+            .Include(sr => sr.Status)
+            .GroupBy(sr => sr.Status != null ? sr.Status.Description : "Unknown")
+            .ToDictionaryAsync(g => g.Key, g => g.Count());
+    }
+}
+
+// ============================================================================
+// FILE 3: Capstone.DAL/Repository/HelpDeskDbContext.cs
+// ============================================================================
+using Capstone.DAL.Models;
+using Microsoft.EntityFrameworkCore;
+
+namespace Capstone.DAL.Repository;
+
+public class HelpDeskDbContext : DbContext
+{
+    public HelpDeskDbContext(DbContextOptions<HelpDeskDbContext> options)
+        : base(options)
+    {
+    }
+
+    public DbSet<Role> Roles => Set<Role>();
+    public DbSet<User> Users => Set<User>();
+    public DbSet<Status> Statuses => Set<Status>();
+    public DbSet<ServiceRequest> ServiceRequests => Set<ServiceRequest>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+
+        modelBuilder.Entity<Role>().ToTable("Role");
+        modelBuilder.Entity<User>().ToTable("User");
+        modelBuilder.Entity<Status>().ToTable("Status");
+        modelBuilder.Entity<ServiceRequest>().ToTable("ServiceRequest");
+
+        modelBuilder.Entity<User>()
+            .HasOne(u => u.Role)
+            .WithMany(r => r.Users)
+            .HasForeignKey(u => u.RoleId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<ServiceRequest>()
+            .HasOne(sr => sr.RaisedByUser)
+            .WithMany(u => u.ServiceRequests)
+            .HasForeignKey(sr => sr.RaisedBy)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<ServiceRequest>()
+            .HasOne(sr => sr.Status)
+            .WithMany(s => s.ServiceRequests)
+            .HasForeignKey(sr => sr.ReqStatus)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<Role>().HasData(
+            new Role { RoleId = 1, RoleName = "Admin" },
+            new Role { RoleId = 2, RoleName = "User" }
+        );
+
+        modelBuilder.Entity<Status>().HasData(
+            new Status { StatusId = 1, Description = "Open" },
+            new Status { StatusId = 2, Description = "In Progress" },
+            new Status { StatusId = 3, Description = "Closed" },
+            new Status { StatusId = 4, Description = "Re-Opened" }
+        );
+    }
+}
+
+// ============================================================================
+// FILE 4: Capstone.DAL.Tests/RepositoryTests.cs
+// ============================================================================
+using Capstone.DAL.Models;
+using Capstone.DAL.Repository;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Xunit;
+
+namespace Capstone.DAL.Tests;
+
+public class RepositoryTests : IDisposable
+{
+    private readonly SqliteConnection _connection;
+    private readonly HelpDeskDbContext _context;
+    private readonly Repository.Repository _repository;
+
+    public RepositoryTests()
+    {
+        _connection = new SqliteConnection("DataSource=:memory:");
+        _connection.Open();
+
+        var options = new DbContextOptionsBuilder<HelpDeskDbContext>()
+            .UseSqlite(_connection)
+            .Options;
+
+        _context = new HelpDeskDbContext(options);
+        _context.Database.EnsureCreated();
+
+        _context.Users.Add(new User
+        {
+            UserName = "alice",
+            Password = "Password123",
+            CreatedOn = DateTime.UtcNow,
+            RoleId = 2
+        });
+        _context.SaveChanges();
+
+        _repository = new Repository.Repository(_context);
+    }
+
+    [Fact]
+    public async Task AuthenticateAsync_ReturnsTrueForValidCredentials_AndFalseForInvalid()
+    {
+        var valid = await _repository.AuthenticateAsync(new User
+        {
+            UserName = "alice",
+            Password = "Password123"
+        });
+
+        var invalid = await _repository.AuthenticateAsync(new User
+        {
+            UserName = "alice",
+            Password = "WrongPassword"
+        });
+
+        Assert.True(valid);
+        Assert.False(invalid);
+    }
+
+    [Fact]
+    public async Task GetUserAsync_IncludesRoleNavigation()
+    {
+        var user = await _repository.GetUserAsync("alice");
+
+        Assert.NotNull(user);
+        Assert.Equal("User", user!.Role?.RoleName);
+    }
+
+    [Fact]
+    public async Task RequestLifecycle_RaiseCloseReOpenSummaryAndDelete_WorksAsExpected()
+    {
+        var created = await _repository.RaiseRequestAsync(new ServiceRequest
+        {
+            Description = "Laptop battery",
+            Details = "Battery drains in under 45 minutes",
+            RaisedBy = "alice",
+            Justification = "Field travel"
+        });
+
+        Assert.True(created.RequestId > 0);
+        Assert.Equal(1, created.ReqStatus);
+
+        var closed = await _repository.CloseRequestAsync(created.RequestId);
+        Assert.True(closed);
+
+        var reopened = await _repository.ReOpenRequestAsync(created.RequestId);
+        Assert.True(reopened);
+
+        var summary = await _repository.GetSummaryRequestByUserAsync("alice");
+        Assert.Equal(1, summary["Re-Opened"]);
+
+        var deleted = await _repository.DeleteRequestAsync(created.RequestId);
+        Assert.True(deleted);
+        Assert.Null(await _repository.GetRequestByIdAsync(created.RequestId));
+    }
+
+    public void Dispose()
+    {
+        _context.Dispose();
+        _connection.Dispose();
+    }
+}
