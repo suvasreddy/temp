@@ -207,7 +207,7 @@ public class HelpDeskDbContext : DbContext
 }
 
 // ============================================================================
-// FILE 4: Capstone.DAL.Tests/RepositoryTests.cs
+// FILE 1: tests/Capstone.DAL.Tests/Repository/HelpDeskDbContextTests.cs
 // ============================================================================
 using Capstone.DAL.Models;
 using Capstone.DAL.Repository;
@@ -215,92 +215,327 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
-namespace Capstone.DAL.Tests;
+namespace Capstone.DAL.Tests.Repository;
 
-public class RepositoryTests : IDisposable
+public sealed class HelpDeskDbContextTests : IDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly HelpDeskDbContext _context;
-    private readonly Repository.Repository _repository;
+
+    public HelpDeskDbContextTests()
+    {
+        _connection = new SqliteConnection("DataSource=:memory:");
+        _connection.Open();
+
+        DbContextOptions<HelpDeskDbContext> options = new DbContextOptionsBuilder<HelpDeskDbContext>()
+            .UseSqlite(_connection)
+            .Options;
+
+        _context = new HelpDeskDbContext(options);
+        _context.Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task OnModelCreating_ShouldSeedExpectedRolesAndStatuses()
+    {
+        List<Role> roles = await _context.Roles
+            .OrderBy(r => r.RoleId)
+            .ToListAsync();
+
+        List<Status> statuses = await _context.Statuses
+            .OrderBy(s => s.StatusId)
+            .ToListAsync();
+
+        Assert.Equal(2, roles.Count);
+        Assert.Equal("Admin", roles[0].RoleName);
+        Assert.Equal("User", roles[1].RoleName);
+
+        Assert.Equal(4, statuses.Count);
+        Assert.Equal("Open", statuses[0].Description);
+        Assert.Equal("In Progress", statuses[1].Description);
+        Assert.Equal("Closed", statuses[2].Description);
+        Assert.Equal("Re-Opened", statuses[3].Description);
+    }
+
+    [Fact]
+    public async Task SaveChangesAsync_ShouldPersistSingularTablesAndNavigationGraph()
+    {
+        User user = new()
+        {
+            UserName = "alice",
+            Password = "Password123",
+            CreatedOn = DateTime.UtcNow,
+            RoleId = 2
+        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        ServiceRequest request = new()
+        {
+            Description = "VPN setup",
+            Details = "Requesting remote VPN access",
+            RaisedBy = "alice",
+            RaisedOn = DateTime.UtcNow,
+            Justification = "Remote sprint work",
+            ReqStatus = 1
+        };
+        _context.ServiceRequests.Add(request);
+        await _context.SaveChangesAsync();
+
+        ServiceRequest? loaded = await _context.ServiceRequests
+            .AsNoTracking()
+            .Include(sr => sr.RaisedByUser)
+                .ThenInclude(u => u!.Role)
+            .Include(sr => sr.Status)
+            .FirstOrDefaultAsync(sr => sr.RequestId == request.RequestId);
+
+        Assert.NotNull(loaded);
+        Assert.Equal("alice", loaded!.RaisedByUser?.UserName);
+        Assert.Equal("User", loaded.RaisedByUser?.Role?.RoleName);
+        Assert.Equal("Open", loaded.Status?.Description);
+    }
+
+    [Fact]
+    public async Task SaveChangesAsync_WhenDeletingReferencedRole_ShouldThrowDbUpdateExceptionDueToRestrict()
+    {
+        _context.Users.Add(new User
+        {
+            UserName = "bob",
+            Password = "Password123",
+            CreatedOn = DateTime.UtcNow,
+            RoleId = 2
+        });
+        await _context.SaveChangesAsync();
+
+        Role role = await _context.Roles.FirstAsync(r => r.RoleId == 2);
+        _context.Roles.Remove(role);
+
+        await Assert.ThrowsAsync<DbUpdateException>(() => _context.SaveChangesAsync());
+    }
+
+    public void Dispose()
+    {
+        _context.Dispose();
+        _connection.Dispose();
+    }
+}
+
+// ============================================================================
+// FILE 2: tests/Capstone.DAL.Tests/Repository/RepositoryTests.cs
+// ============================================================================
+using Capstone.DAL.Models;
+using Capstone.DAL.Repository;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Xunit;
+
+namespace Capstone.DAL.Tests.Repository;
+
+public sealed class RepositoryTests : IDisposable
+{
+    private readonly SqliteConnection _connection;
+    private readonly HelpDeskDbContext _context;
+    private readonly IRepository _repository;
 
     public RepositoryTests()
     {
         _connection = new SqliteConnection("DataSource=:memory:");
         _connection.Open();
 
-        var options = new DbContextOptionsBuilder<HelpDeskDbContext>()
+        DbContextOptions<HelpDeskDbContext> options = new DbContextOptionsBuilder<HelpDeskDbContext>()
             .UseSqlite(_connection)
             .Options;
 
         _context = new HelpDeskDbContext(options);
         _context.Database.EnsureCreated();
 
-        _context.Users.Add(new User
-        {
-            UserName = "alice",
-            Password = "Password123",
-            CreatedOn = DateTime.UtcNow,
-            RoleId = 2
-        });
+        _context.Users.AddRange(
+            new User
+            {
+                UserName = "alice",
+                Password = "Password123",
+                CreatedOn = DateTime.UtcNow,
+                RoleId = 2
+            },
+            new User
+            {
+                UserName = "admin",
+                Password = "AdminPassword123",
+                CreatedOn = DateTime.UtcNow,
+                RoleId = 1
+            });
         _context.SaveChanges();
 
-        _repository = new Repository.Repository(_context);
+        _repository = new Capstone.DAL.Repository.Repository(_context);
     }
 
     [Fact]
-    public async Task AuthenticateAsync_ReturnsTrueForValidCredentials_AndFalseForInvalid()
+    public async Task AuthenticateAsync_WithValidCredentials_ShouldReturnTrue()
     {
-        var valid = await _repository.AuthenticateAsync(new User
+        bool result = await _repository.AuthenticateAsync(new User
         {
             UserName = "alice",
             Password = "Password123"
         });
 
-        var invalid = await _repository.AuthenticateAsync(new User
+        Assert.True(result);
+    }
+
+    [Theory]
+    [InlineData("alice", "WrongPassword")]
+    [InlineData("unknown_user", "Password123")]
+    [InlineData("", "Password123")]
+    [InlineData("alice", "")]
+    public async Task AuthenticateAsync_WithInvalidOrMissingCredentials_ShouldReturnFalse(string userName, string password)
+    {
+        bool result = await _repository.AuthenticateAsync(new User
         {
-            UserName = "alice",
-            Password = "WrongPassword"
+            UserName = userName,
+            Password = password
         });
 
-        Assert.True(valid);
-        Assert.False(invalid);
+        Assert.False(result);
     }
 
     [Fact]
-    public async Task GetUserAsync_IncludesRoleNavigation()
+    public async Task GetUserAsync_WhenUserExists_ShouldReturnUserWithRoleNavigation()
     {
-        var user = await _repository.GetUserAsync("alice");
+        User? user = await _repository.GetUserAsync("admin");
 
         Assert.NotNull(user);
-        Assert.Equal("User", user!.Role?.RoleName);
+        Assert.Equal("admin", user!.UserName);
+        Assert.Equal("Admin", user.Role?.RoleName);
     }
 
     [Fact]
-    public async Task RequestLifecycle_RaiseCloseReOpenSummaryAndDelete_WorksAsExpected()
+    public async Task GetUserAsync_WhenUserDoesNotExist_ShouldReturnNull()
     {
-        var created = await _repository.RaiseRequestAsync(new ServiceRequest
+        User? user = await _repository.GetUserAsync("does_not_exist");
+
+        Assert.Null(user);
+    }
+
+    [Fact]
+    public async Task RaiseRequestAsync_ShouldDefaultStatusToOpenAndAssignId()
+    {
+        ServiceRequest created = await _repository.RaiseRequestAsync(new ServiceRequest
         {
-            Description = "Laptop battery",
-            Details = "Battery drains in under 45 minutes",
+            Description = "Monitor replacement",
+            Details = "Flickering display on secondary monitor",
             RaisedBy = "alice",
-            Justification = "Field travel"
+            Justification = "Daily development work"
         });
 
         Assert.True(created.RequestId > 0);
         Assert.Equal(1, created.ReqStatus);
+        Assert.NotEqual(default, created.RaisedOn);
+    }
 
-        var closed = await _repository.CloseRequestAsync(created.RequestId);
+    [Fact]
+    public async Task ViewRequestsAsync_ShouldFilterByUserNameWhenProvidedOrReturnAll()
+    {
+        await _repository.RaiseRequestAsync(new ServiceRequest
+        {
+            Description = "Alice request",
+            Details = "Details for Alice",
+            RaisedBy = "alice",
+            Justification = "Work"
+        });
+
+        await _repository.RaiseRequestAsync(new ServiceRequest
+        {
+            Description = "Admin request",
+            Details = "Details for Admin",
+            RaisedBy = "admin",
+            Justification = "Operations"
+        });
+
+        List<ServiceRequest> allRequests = (await _repository.ViewRequestsAsync()).ToList();
+        List<ServiceRequest> aliceRequests = (await _repository.ViewRequestsAsync("alice")).ToList();
+
+        Assert.Equal(2, allRequests.Count);
+        Assert.Single(aliceRequests);
+        Assert.Equal("alice", aliceRequests[0].RaisedBy);
+    }
+
+    [Fact]
+    public async Task CloseAndReOpenRequestAsync_ShouldUpdateStatusCodes()
+    {
+        ServiceRequest created = await _repository.RaiseRequestAsync(new ServiceRequest
+        {
+            Description = "Access issue",
+            Details = "Repo permission needed",
+            RaisedBy = "alice",
+            Justification = "Feature branch"
+        });
+
+        bool closed = await _repository.CloseRequestAsync(created.RequestId);
+        ServiceRequest? afterClose = await _repository.GetRequestByIdAsync(created.RequestId);
+
+        bool reopened = await _repository.ReOpenRequestAsync(created.RequestId);
+        ServiceRequest? afterReopen = await _repository.GetRequestByIdAsync(created.RequestId);
+
         Assert.True(closed);
-
-        var reopened = await _repository.ReOpenRequestAsync(created.RequestId);
+        Assert.Equal(3, afterClose?.ReqStatus);
         Assert.True(reopened);
+        Assert.Equal(4, afterReopen?.ReqStatus);
+    }
 
-        var summary = await _repository.GetSummaryRequestByUserAsync("alice");
+    [Fact]
+    public async Task GetSummaryRequestByUserAsync_ShouldGroupCountsByStatusDescription()
+    {
+        ServiceRequest first = await _repository.RaiseRequestAsync(new ServiceRequest
+        {
+            Description = "Request 1",
+            Details = "First request",
+            RaisedBy = "alice",
+            Justification = "Task 1"
+        });
+
+        ServiceRequest second = await _repository.RaiseRequestAsync(new ServiceRequest
+        {
+            Description = "Request 2",
+            Details = "Second request",
+            RaisedBy = "alice",
+            Justification = "Task 2"
+        });
+
+        await _repository.CloseRequestAsync(first.RequestId);
+        await _repository.ReOpenRequestAsync(second.RequestId);
+
+        Dictionary<string, int> summary = await _repository.GetSummaryRequestByUserAsync("alice");
+
+        Assert.Equal(1, summary["Closed"]);
         Assert.Equal(1, summary["Re-Opened"]);
+    }
 
-        var deleted = await _repository.DeleteRequestAsync(created.RequestId);
+    [Fact]
+    public async Task DeleteRequestAsync_WhenRequestExists_ShouldRemoveRecord()
+    {
+        ServiceRequest created = await _repository.RaiseRequestAsync(new ServiceRequest
+        {
+            Description = "Temporary ticket",
+            Details = "To be deleted",
+            RaisedBy = "alice",
+            Justification = "Cleanup test"
+        });
+
+        bool deleted = await _repository.DeleteRequestAsync(created.RequestId);
+        ServiceRequest? loaded = await _repository.GetRequestByIdAsync(created.RequestId);
+
         Assert.True(deleted);
-        Assert.Null(await _repository.GetRequestByIdAsync(created.RequestId));
+        Assert.Null(loaded);
+    }
+
+    [Fact]
+    public async Task MissingRequestId_ShouldReturnFalseForStateChangesAndDelete()
+    {
+        const int nonExistentId = 99999;
+
+        Assert.False(await _repository.CloseRequestAsync(nonExistentId));
+        Assert.False(await _repository.ReOpenRequestAsync(nonExistentId));
+        Assert.False(await _repository.DeleteRequestAsync(nonExistentId));
+        Assert.Null(await _repository.GetRequestByIdAsync(nonExistentId));
     }
 
     public void Dispose()
