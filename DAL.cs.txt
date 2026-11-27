@@ -1,520 +1,350 @@
-// ============================================================================
-// FILE 1: Capstone.DAL/DTOs/RequestSummaryItem.cs
-// ============================================================================
-namespace Capstone.DAL.DTOs;
+#!/usr/bin/env bash
+set -e
 
-public class RequestSummaryItem
+# 1. Create GenericResponse folder and ResponseResult.cs
+mkdir -p Capstone.API/GenericResponse
+cat << 'EOF' > Capstone.API/GenericResponse/ResponseResult.cs
+namespace Capstone.API.GenericResponse;
+
+public class GenericResponse<T>
 {
-    public int RequestId { get; set; }
-    public string Description { get; set; } = string.Empty;
-    public string Status { get; set; } = string.Empty;
-    public DateTime RaisedOn { get; set; }
+    public bool Success { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public T? Data { get; set; }
+    public List<string>? Errors { get; set; }
+
+    public static GenericResponse<T> Ok(T? data, string message = "Request completed successfully.") => new()
+    {
+        Success = true,
+        Message = message,
+        Data = data,
+        Errors = null
+    };
+
+    public static GenericResponse<T> Fail(string message, List<string>? errors = null) => new()
+    {
+        Success = false,
+        Message = message,
+        Data = default,
+        Errors = errors
+    };
 }
+EOF
 
-// ============================================================================
-// FILE 2: Capstone.DAL/DTOs/SummaryResponse.cs
-// ============================================================================
-namespace Capstone.DAL.DTOs;
+# 2. Create Middleware folder and ExceptionHandlingMiddleware.cs
+mkdir -p Capstone.API/Middleware
+cat << 'EOF' > Capstone.API/Middleware/ExceptionHandlingMiddleware.cs
+using System.Net;
+using System.Text.Json;
+using Capstone.API.GenericResponse;
 
-public class SummaryResponse
+namespace Capstone.API.Middleware;
+
+public class ExceptionHandlingMiddleware
 {
-    public string UserName { get; set; } = string.Empty;
-    public int TotalRequests { get; set; }
-    public int OpenRequests { get; set; }
-    public int InProgressRequests { get; set; }
-    public int ClosedRequests { get; set; }
-    public int ReOpenedRequests { get; set; }
-    public List<RequestSummaryItem> Requests { get; set; } = new();
-}
+    private readonly RequestDelegate _next;
+    private readonly ILogger<ExceptionHandlingMiddleware> _logger;
 
-// ============================================================================
-// FILE 3: Capstone.DAL/Repository/IRepository.cs
-// ============================================================================
-using Capstone.DAL.DTOs;
-using Capstone.DAL.Models;
-
-namespace Capstone.DAL.Repository;
-
-public interface IRepository
-{
-    public bool Authenticate(User user);
-    public List<ServiceRequest> ViewRequests();
-    public List<ServiceRequest> ViewRequests(string userName);
-    public int RaiseRequest(ServiceRequest newRequest);
-    public ServiceRequest? GetRequestById(int requestId);
-    public bool ReOpenRequest(ServiceRequest request);
-    public List<ServiceRequest> GetRequestBySP(string userName);
-    public bool CloseRequest(int requestId);
-    public bool DeleteRequest(int requestId);
-    public User? GetUser(string userName);
-    public Task<SummaryResponse> GetSummaryRequestByUserAsync(string userName);
-}
-
-// ============================================================================
-// FILE 4: Capstone.DAL/Repository/Repository.cs
-// ============================================================================
-using Capstone.DAL.DTOs;
-using Capstone.DAL.Models;
-using Microsoft.EntityFrameworkCore;
-
-namespace Capstone.DAL.Repository;
-
-public class Repository : IRepository
-{
-    private readonly HelpDeskDbContext _context;
-
-    public Repository(HelpDeskDbContext context)
+    private static readonly JsonSerializerOptions SerializerOptions = new()
     {
-        _context = context;
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
+    public ExceptionHandlingMiddleware(RequestDelegate next, ILogger<ExceptionHandlingMiddleware> logger)
+    {
+        _next = next;
+        _logger = logger;
     }
 
-    public bool Authenticate(User user)
+    public async Task InvokeAsync(HttpContext context)
     {
-        if (string.IsNullOrWhiteSpace(user.UserName) || string.IsNullOrWhiteSpace(user.Password))
+        try
         {
-            return false;
+            await _next(context);
         }
-
-        return _context.Users
-            .AsNoTracking()
-            .Any(u => u.UserName == user.UserName && u.Password == user.Password);
-    }
-
-    public List<ServiceRequest> ViewRequests()
-    {
-        return _context.ServiceRequests
-            .AsNoTracking()
-            .Include(sr => sr.RaisedByUser)
-                .ThenInclude(u => u!.Role)
-            .Include(sr => sr.Status)
-            .OrderByDescending(sr => sr.RaisedOn)
-            .ToList();
-    }
-
-    public List<ServiceRequest> ViewRequests(string userName)
-    {
-        return _context.ServiceRequests
-            .AsNoTracking()
-            .Include(sr => sr.RaisedByUser)
-                .ThenInclude(u => u!.Role)
-            .Include(sr => sr.Status)
-            .Where(sr => sr.RaisedBy == userName)
-            .OrderByDescending(sr => sr.RaisedOn)
-            .ToList();
-    }
-
-    public int RaiseRequest(ServiceRequest newRequest)
-    {
-        newRequest.RaisedOn = DateTime.UtcNow;
-        if (newRequest.ReqStatus == 0)
+        catch (Exception ex)
         {
-            newRequest.ReqStatus = 1;
+            _logger.LogError(ex, "Unhandled exception occurred while processing {Method} {Path}",
+                context.Request.Method, context.Request.Path);
+
+            await HandleExceptionAsync(context, ex);
         }
-
-        _context.ServiceRequests.Add(newRequest);
-        _context.SaveChanges();
-        return newRequest.RequestId;
     }
 
-    public ServiceRequest? GetRequestById(int requestId)
+    private static async Task HandleExceptionAsync(HttpContext context, Exception exception)
     {
-        return _context.ServiceRequests
-            .AsNoTracking()
-            .Include(sr => sr.RaisedByUser)
-                .ThenInclude(u => u!.Role)
-            .Include(sr => sr.Status)
-            .FirstOrDefault(sr => sr.RequestId == requestId);
-    }
-
-    public bool ReOpenRequest(ServiceRequest request)
-    {
-        var existing = _context.ServiceRequests.Find(request.RequestId);
-        if (existing is null)
+        var (statusCode, message) = exception switch
         {
-            return false;
-        }
-
-        existing.ReqStatus = 4;
-        _context.SaveChanges();
-        return true;
-    }
-
-    public List<ServiceRequest> GetRequestBySP(string userName)
-    {
-        return _context.ServiceRequests
-            .FromSqlInterpolated($"SELECT * FROM ServiceRequest WHERE RaisedBy = {userName}")
-            .AsNoTracking()
-            .ToList();
-    }
-
-    public bool CloseRequest(int requestId)
-    {
-        var request = _context.ServiceRequests.Find(requestId);
-        if (request is null)
-        {
-            return false;
-        }
-
-        request.ReqStatus = 3;
-        _context.SaveChanges();
-        return true;
-    }
-
-    public bool DeleteRequest(int requestId)
-    {
-        var request = _context.ServiceRequests.Find(requestId);
-        if (request is null)
-        {
-            return false;
-        }
-
-        _context.ServiceRequests.Remove(request);
-        _context.SaveChanges();
-        return true;
-    }
-
-    public User? GetUser(string userName)
-    {
-        return _context.Users
-            .AsNoTracking()
-            .Include(u => u.Role)
-            .FirstOrDefault(u => u.UserName == userName);
-    }
-
-    public async Task<SummaryResponse> GetSummaryRequestByUserAsync(string userName)
-    {
-        var requests = await _context.ServiceRequests
-            .AsNoTracking()
-            .Include(sr => sr.Status)
-            .Where(sr => sr.RaisedBy == userName)
-            .OrderByDescending(sr => sr.RaisedOn)
-            .ToListAsync();
-
-        return new SummaryResponse
-        {
-            UserName = userName,
-            TotalRequests = requests.Count,
-            OpenRequests = requests.Count(sr => sr.ReqStatus == 1),
-            InProgressRequests = requests.Count(sr => sr.ReqStatus == 2),
-            ClosedRequests = requests.Count(sr => sr.ReqStatus == 3),
-            ReOpenedRequests = requests.Count(sr => sr.ReqStatus == 4),
-            Requests = requests.Select(sr => new RequestSummaryItem
-            {
-                RequestId = sr.RequestId,
-                Description = sr.Description ?? string.Empty,
-                Status = sr.Status?.Description ?? string.Empty,
-                RaisedOn = sr.RaisedOn
-            }).ToList()
+            KeyNotFoundException => (HttpStatusCode.NotFound, exception.Message),
+            ArgumentException => (HttpStatusCode.BadRequest, exception.Message),
+            _ => (HttpStatusCode.InternalServerError, "An unexpected error occurred while processing your request.")
         };
+
+        context.Response.ContentType = "application/json";
+        context.Response.StatusCode = (int)statusCode;
+
+        var response = GenericResponse<object>.Fail(
+            message: message,
+            errors: [exception.Message]);
+
+        var json = JsonSerializer.Serialize(response, SerializerOptions);
+        await context.Response.WriteAsync(json);
     }
 }
+EOF
 
-// ============================================================================
-// FILE 5: Capstone.DAL/Repository/HelpDeskDbContext.cs
-// ============================================================================
-using Capstone.DAL.Models;
+# 3. Write Capstone.API/Program.cs with middleware registered
+cat << 'EOF' > Capstone.API/Program.cs
+using Capstone.API.Middleware;
+using Capstone.DAL;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Design;
 
-namespace Capstone.DAL.Repository;
+namespace Capstone.API;
 
-public class HelpDeskDbContext : DbContext
+public partial class Program
 {
-    public HelpDeskDbContext(DbContextOptions<HelpDeskDbContext> options)
-        : base(options)
+    public static void Main(string[] args)
     {
-    }
+        var builder = WebApplication.CreateBuilder(args);
 
-    public class HelpDeskDbContextFactory : IDesignTimeDbContextFactory<HelpDeskDbContext>
-    {
-        public HelpDeskDbContext CreateDbContext(string[] args)
+        var rawConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
+            ?? throw new InvalidOperationException("Connection string 'DefaultConnection' was not found.");
+
+        var resolvedConnectionString = ResolveSqliteConnectionString(
+            rawConnectionString,
+            builder.Environment.ContentRootPath);
+
+        builder.Services.AddDbContext<HelpDeskDbContext>(options =>
+            options.UseSqlite(resolvedConnectionString));
+
+        builder.Services.AddScoped<IRepository, Repository>();
+
+        builder.Services.AddControllers();
+        builder.Services.AddEndpointsApiExplorer();
+        builder.Services.AddSwaggerGen();
+
+        var app = builder.Build();
+
+        app.UseMiddleware<ExceptionHandlingMiddleware>();
+
+        if (app.Environment.IsDevelopment())
         {
-            var options = new DbContextOptionsBuilder<HelpDeskDbContext>()
-                .UseSqlite(@"Data Source=Database\ServiceDeskDB.db")
-                .Options;
-
-            return new HelpDeskDbContext(options);
+            app.UseSwagger();
+            app.UseSwaggerUI();
         }
+
+        app.UseHttpsRedirection();
+
+        app.UseAuthorization();
+
+        app.MapControllers();
+
+        app.Run();
     }
 
-    public DbSet<Role> Roles { get; set; }
-    public DbSet<User> Users { get; set; }
-    public DbSet<ServiceRequest> ServiceRequests { get; set; }
-    public DbSet<Status> Statuses { get; set; }
-
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    private static string ResolveSqliteConnectionString(string connectionString, string contentRootPath)
     {
-        base.OnModelCreating(modelBuilder);
+        const string prefix = "Data Source=";
+        if (!connectionString.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return connectionString;
+        }
 
-        modelBuilder.Entity<Role>().ToTable("Role");
-        modelBuilder.Entity<User>().ToTable("User");
-        modelBuilder.Entity<Status>().ToTable("Status");
-        modelBuilder.Entity<ServiceRequest>().ToTable("ServiceRequest");
+        var dataSource = connectionString[prefix.Length..].Trim();
+        if (Path.IsPathRooted(dataSource))
+        {
+            return connectionString;
+        }
 
-        modelBuilder.Entity<User>()
-            .HasOne(u => u.Role)
-            .WithMany()
-            .HasForeignKey(u => u.RoleId)
-            .OnDelete(DeleteBehavior.Restrict);
-
-        modelBuilder.Entity<ServiceRequest>()
-            .HasOne(sr => sr.RaisedByUser)
-            .WithMany()
-            .HasForeignKey(sr => sr.RaisedBy)
-            .OnDelete(DeleteBehavior.Restrict);
-
-        modelBuilder.Entity<ServiceRequest>()
-            .HasOne(sr => sr.Status)
-            .WithMany()
-            .HasForeignKey(sr => sr.ReqStatus)
-            .OnDelete(DeleteBehavior.Restrict);
-
-        modelBuilder.Entity<Role>().HasData(
-            new Role { RoleId = 1, RoleName = "Admin" },
-            new Role { RoleId = 2, RoleName = "User" }
-        );
-
-        modelBuilder.Entity<Status>().HasData(
-            new Status { StatusId = 1, Description = "Open" },
-            new Status { StatusId = 2, Description = "In Progress" },
-            new Status { StatusId = 3, Description = "Closed" },
-            new Status { StatusId = 4, Description = "Re-Opened" }
-        );
+        var fullPath = Path.GetFullPath(Path.Combine(contentRootPath, dataSource));
+        return $"{prefix}{fullPath}";
     }
 }
+EOF
 
-// ============================================================================
-// FILE 6: tests/Capstone.DAL.Tests/Repository/RepositoryTests.cs
-// ============================================================================
-using Capstone.DAL.DTOs;
-using Capstone.DAL.Models;
-using Capstone.DAL.Repository;
-using Microsoft.Data.Sqlite;
-using Microsoft.EntityFrameworkCore;
+# 4. Create Capstone.API.Tests project, add to solution, reference Capstone.API
+if [ ! -d "Capstone.API.Tests" ]; then
+    dotnet new xunit -n Capstone.API.Tests -f net9.0
+fi
+
+dotnet sln add Capstone.API.Tests/Capstone.API.Tests.csproj || true
+dotnet add Capstone.API.Tests/Capstone.API.Tests.csproj reference Capstone.API/Capstone.API.csproj
+
+cat << 'EOF' > Capstone.API.Tests/Capstone.API.Tests.csproj
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.2" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Capstone.API\Capstone.API.csproj" />
+  </ItemGroup>
+
+</Project>
+EOF
+
+rm -f Capstone.API.Tests/UnitTest1.cs
+
+cat << 'EOF' > Capstone.API.Tests/GenericResponseTests.cs
+using Capstone.API.GenericResponse;
 using Xunit;
 
-namespace Capstone.DAL.Tests.Repository;
+namespace Capstone.API.Tests;
 
-public sealed class RepositoryTests : IDisposable
+public class GenericResponseTests
 {
-    private readonly SqliteConnection _connection;
-    private readonly HelpDeskDbContext _context;
-    private readonly IRepository _repository;
-
-    public RepositoryTests()
+    [Fact]
+    public void Ok_SetsSuccessTrueAndPopulatesData()
     {
-        _connection = new SqliteConnection("DataSource=:memory:");
-        _connection.Open();
+        var response = GenericResponse<string>.Ok("Ticket #101", "Created successfully");
 
-        DbContextOptions<HelpDeskDbContext> options = new DbContextOptionsBuilder<HelpDeskDbContext>()
-            .UseSqlite(_connection)
-            .Options;
-
-        _context = new HelpDeskDbContext(options);
-        _context.Database.EnsureCreated();
-
-        _context.Users.AddRange(
-            new User
-            {
-                UserName = "alice",
-                Password = "Password123",
-                CreatedOn = DateTime.UtcNow,
-                RoleId = 2
-            },
-            new User
-            {
-                UserName = "admin",
-                Password = "AdminPassword123",
-                CreatedOn = DateTime.UtcNow,
-                RoleId = 1
-            });
-        _context.SaveChanges();
-
-        _repository = new Capstone.DAL.Repository.Repository(_context);
+        Assert.True(response.Success);
+        Assert.Equal("Created successfully", response.Message);
+        Assert.Equal("Ticket #101", response.Data);
+        Assert.Null(response.Errors);
     }
 
     [Fact]
-    public void Authenticate_WithValidCredentials_ShouldReturnTrue()
+    public void Fail_SetsSuccessFalseAndPopulatesErrors()
     {
-        bool result = _repository.Authenticate(new User
-        {
-            UserName = "alice",
-            Password = "Password123"
-        });
+        var errors = new List<string> { "Title is required." };
+        var response = GenericResponse<string>.Fail("Validation failed", errors);
 
-        Assert.True(result);
-    }
-
-    [Theory]
-    [InlineData("alice", "WrongPassword")]
-    [InlineData("unknown_user", "Password123")]
-    [InlineData("", "Password123")]
-    [InlineData("alice", "")]
-    public void Authenticate_WithInvalidOrMissingCredentials_ShouldReturnFalse(string userName, string password)
-    {
-        bool result = _repository.Authenticate(new User
-        {
-            UserName = userName,
-            Password = password
-        });
-
-        Assert.False(result);
-    }
-
-    [Fact]
-    public void GetUser_WhenUserExists_ShouldReturnUserWithRoleNavigation()
-    {
-        User? user = _repository.GetUser("admin");
-
-        Assert.NotNull(user);
-        Assert.Equal("admin", user!.UserName);
-        Assert.Equal("Admin", user.Role?.RoleName);
-    }
-
-    [Fact]
-    public void GetUser_WhenUserDoesNotExist_ShouldReturnNull()
-    {
-        User? user = _repository.GetUser("does_not_exist");
-
-        Assert.Null(user);
-    }
-
-    [Fact]
-    public void RaiseRequest_ShouldDefaultStatusToOpenAndReturnNewId()
-    {
-        ServiceRequest request = new()
-        {
-            Description = "Monitor replacement",
-            Details = "Flickering display on secondary monitor",
-            RaisedBy = "alice",
-            Justification = "Daily development work"
-        };
-
-        int createdId = _repository.RaiseRequest(request);
-        ServiceRequest? loaded = _repository.GetRequestById(createdId);
-
-        Assert.True(createdId > 0);
-        Assert.NotNull(loaded);
-        Assert.Equal(1, loaded!.ReqStatus);
-        Assert.NotEqual(default, loaded.RaisedOn);
-    }
-
-    [Fact]
-    public void ViewRequests_ShouldReturnAllOrFilterByUserName()
-    {
-        _repository.RaiseRequest(new ServiceRequest
-        {
-            Description = "Alice request",
-            Details = "Details for Alice",
-            RaisedBy = "alice",
-            Justification = "Work"
-        });
-
-        _repository.RaiseRequest(new ServiceRequest
-        {
-            Description = "Admin request",
-            Details = "Details for Admin",
-            RaisedBy = "admin",
-            Justification = "Operations"
-        });
-
-        List<ServiceRequest> allRequests = _repository.ViewRequests();
-        List<ServiceRequest> aliceRequests = _repository.ViewRequests("alice");
-
-        Assert.Equal(2, allRequests.Count);
-        Assert.Single(aliceRequests);
-        Assert.Equal("alice", aliceRequests[0].RaisedBy);
-    }
-
-    [Fact]
-    public void CloseAndReOpenRequest_ShouldUpdateStatusCodes()
-    {
-        int createdId = _repository.RaiseRequest(new ServiceRequest
-        {
-            Description = "Access issue",
-            Details = "Repo permission needed",
-            RaisedBy = "alice",
-            Justification = "Feature branch"
-        });
-
-        bool closed = _repository.CloseRequest(createdId);
-        ServiceRequest? afterClose = _repository.GetRequestById(createdId);
-
-        bool reopened = _repository.ReOpenRequest(new ServiceRequest { RequestId = createdId });
-        ServiceRequest? afterReopen = _repository.GetRequestById(createdId);
-
-        Assert.True(closed);
-        Assert.Equal(3, afterClose?.ReqStatus);
-        Assert.True(reopened);
-        Assert.Equal(4, afterReopen?.ReqStatus);
-    }
-
-    [Fact]
-    public async Task GetSummaryRequestByUserAsync_ShouldReturnCountsAndProjectedItems()
-    {
-        int firstId = _repository.RaiseRequest(new ServiceRequest
-        {
-            Description = "Request 1",
-            Details = "First request",
-            RaisedBy = "alice",
-            Justification = "Task 1"
-        });
-
-        int secondId = _repository.RaiseRequest(new ServiceRequest
-        {
-            Description = "Request 2",
-            Details = "Second request",
-            RaisedBy = "alice",
-            Justification = "Task 2"
-        });
-
-        _repository.CloseRequest(firstId);
-        _repository.ReOpenRequest(new ServiceRequest { RequestId = secondId });
-
-        SummaryResponse summary = await _repository.GetSummaryRequestByUserAsync("alice");
-
-        Assert.Equal("alice", summary.UserName);
-        Assert.Equal(2, summary.TotalRequests);
-        Assert.Equal(0, summary.OpenRequests);
-        Assert.Equal(1, summary.ClosedRequests);
-        Assert.Equal(1, summary.ReOpenedRequests);
-        Assert.Equal(2, summary.Requests.Count);
-        Assert.Contains(summary.Requests, item => item.RequestId == firstId && item.Status == "Closed");
-        Assert.Contains(summary.Requests, item => item.RequestId == secondId && item.Status == "Re-Opened");
-    }
-
-    [Fact]
-    public void DeleteRequest_WhenRequestExists_ShouldRemoveRecord()
-    {
-        int createdId = _repository.RaiseRequest(new ServiceRequest
-        {
-            Description = "Temporary ticket",
-            Details = "To be deleted",
-            RaisedBy = "alice",
-            Justification = "Cleanup test"
-        });
-
-        bool deleted = _repository.DeleteRequest(createdId);
-        ServiceRequest? loaded = _repository.GetRequestById(createdId);
-
-        Assert.True(deleted);
-        Assert.Null(loaded);
-    }
-
-    [Fact]
-    public void MissingRequestId_ShouldReturnFalseOrNullForOperations()
-    {
-        const int nonExistentId = 99999;
-
-        Assert.False(_repository.CloseRequest(nonExistentId));
-        Assert.False(_repository.ReOpenRequest(new ServiceRequest { RequestId = nonExistentId }));
-        Assert.False(_repository.DeleteRequest(nonExistentId));
-        Assert.Null(_repository.GetRequestById(nonExistentId));
-    }
-
-    public void Dispose()
-    {
-        _context.Dispose();
-        _connection.Dispose();
+        Assert.False(response.Success);
+        Assert.Equal("Validation failed", response.Message);
+        Assert.Null(response.Data);
+        Assert.Equal(errors, response.Errors);
     }
 }
+EOF
+
+cat << 'EOF' > Capstone.API.Tests/ExceptionHandlingMiddlewareTests.cs
+using System.Net;
+using System.Text.Json;
+using Capstone.API.GenericResponse;
+using Capstone.API.Middleware;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
+using Xunit;
+
+namespace Capstone.API.Tests;
+
+public class ExceptionHandlingMiddlewareTests
+{
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    [Fact]
+    public async Task InvokeAsync_WhenNoException_CallsNextAndKeepsResponse()
+    {
+        var context = new DefaultHttpContext();
+        context.Response.Body = new MemoryStream();
+
+        RequestDelegate next = async ctx =>
+        {
+            ctx.Response.StatusCode = StatusCodes.Status200OK;
+            await ctx.Response.WriteAsync("ok");
+        };
+
+        var middleware = new ExceptionHandlingMiddleware(next, NullLogger<ExceptionHandlingMiddleware>.Instance);
+
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+        context.Response.Body.Position = 0;
+        var body = await new StreamReader(context.Response.Body).ReadToEndAsync();
+        Assert.Equal("ok", body);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_WhenKeyNotFoundException_Returns404GenericResponse()
+    {
+        var context = new DefaultHttpContext();
+        context.Response.Body = new MemoryStream();
+
+        RequestDelegate next = _ => throw new KeyNotFoundException("Ticket 42 not found.");
+        var middleware = new ExceptionHandlingMiddleware(next, NullLogger<ExceptionHandlingMiddleware>.Instance);
+
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal((int)HttpStatusCode.NotFound, context.Response.StatusCode);
+        Assert.Equal("application/json", context.Response.ContentType);
+
+        context.Response.Body.Position = 0;
+        var payload = await JsonSerializer.DeserializeAsync<GenericResponse<object>>(context.Response.Body, JsonOptions);
+
+        Assert.NotNull(payload);
+        Assert.False(payload.Success);
+        Assert.Equal("Ticket 42 not found.", payload.Message);
+        Assert.Null(payload.Data);
+        Assert.Contains("Ticket 42 not found.", payload.Errors!);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_WhenArgumentException_Returns400GenericResponse()
+    {
+        var context = new DefaultHttpContext();
+        context.Response.Body = new MemoryStream();
+
+        RequestDelegate next = _ => throw new ArgumentException("Invalid priority value.");
+        var middleware = new ExceptionHandlingMiddleware(next, NullLogger<ExceptionHandlingMiddleware>.Instance);
+
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal((int)HttpStatusCode.BadRequest, context.Response.StatusCode);
+        Assert.Equal("application/json", context.Response.ContentType);
+
+        context.Response.Body.Position = 0;
+        var payload = await JsonSerializer.DeserializeAsync<GenericResponse<object>>(context.Response.Body, JsonOptions);
+
+        Assert.NotNull(payload);
+        Assert.False(payload.Success);
+        Assert.Equal("Invalid priority value.", payload.Message);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_WhenUnhandledException_Returns500GenericResponse()
+    {
+        var context = new DefaultHttpContext();
+        context.Response.Body = new MemoryStream();
+
+        RequestDelegate next = _ => throw new InvalidOperationException("Database lock timeout.");
+        var middleware = new ExceptionHandlingMiddleware(next, NullLogger<ExceptionHandlingMiddleware>.Instance);
+
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal((int)HttpStatusCode.InternalServerError, context.Response.StatusCode);
+        Assert.Equal("application/json", context.Response.ContentType);
+
+        context.Response.Body.Position = 0;
+        var payload = await JsonSerializer.DeserializeAsync<GenericResponse<object>>(context.Response.Body, JsonOptions);
+
+        Assert.NotNull(payload);
+        Assert.False(payload.Success);
+        Assert.Equal("An unexpected error occurred while processing your request.", payload.Message);
+        Assert.Null(payload.Data);
+        Assert.Contains("Database lock timeout.", payload.Errors!);
+    }
+}
+EOF
+
+# 5. Build and run unit tests
+dotnet build
+dotnet test
