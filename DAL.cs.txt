@@ -7,15 +7,17 @@ namespace Capstone.DAL.Repository;
 
 public interface IRepository
 {
-    Task<bool> AuthenticateAsync(User user);
-    Task<User?> GetUserAsync(string userName);
-    Task<ServiceRequest> RaiseRequestAsync(ServiceRequest request);
-    Task<IEnumerable<ServiceRequest>> ViewRequestsAsync(string? userName = null);
-    Task<ServiceRequest?> GetRequestByIdAsync(int requestId);
-    Task<bool> ReOpenRequestAsync(int requestId);
-    Task<bool> CloseRequestAsync(int requestId);
-    Task<bool> DeleteRequestAsync(int requestId);
-    Task<Dictionary<string, int>> GetSummaryRequestByUserAsync(string userName);
+    public bool Authenticate(User user);
+    public List<ServiceRequest> ViewRequests();
+    public List<ServiceRequest> ViewRequests(string userName);
+    public int RaiseRequest(ServiceRequest newRequest);
+    public ServiceRequest? GetRequestById(int requestId);
+    public bool ReOpenRequest(ServiceRequest request);
+    public List<ServiceRequest> GetRequestBySP(string userName);
+    public bool CloseRequest(int requestId);
+    public bool DeleteRequest(int requestId);
+    public User? GetUser(string userName);
+    public Task<Dictionary<string, int>> GetSummaryRequestByUserAsync(string userName);
 }
 
 // ============================================================================
@@ -35,103 +37,117 @@ public class Repository : IRepository
         _context = context;
     }
 
-    public async Task<bool> AuthenticateAsync(User user)
+    public bool Authenticate(User user)
     {
         if (string.IsNullOrWhiteSpace(user.UserName) || string.IsNullOrWhiteSpace(user.Password))
         {
             return false;
         }
 
-        return await _context.Users
+        return _context.Users
             .AsNoTracking()
-            .AnyAsync(u => u.UserName == user.UserName && u.Password == user.Password);
+            .Any(u => u.UserName == user.UserName && u.Password == user.Password);
     }
 
-    public async Task<User?> GetUserAsync(string userName)
+    public List<ServiceRequest> ViewRequests()
     {
-        return await _context.Users
-            .AsNoTracking()
-            .Include(u => u.Role)
-            .FirstOrDefaultAsync(u => u.UserName == userName);
-    }
-
-    public async Task<ServiceRequest> RaiseRequestAsync(ServiceRequest request)
-    {
-        request.RaisedOn = DateTime.UtcNow;
-        if (request.ReqStatus == 0)
-        {
-            request.ReqStatus = 1;
-        }
-
-        _context.ServiceRequests.Add(request);
-        await _context.SaveChangesAsync();
-        return request;
-    }
-
-    public async Task<IEnumerable<ServiceRequest>> ViewRequestsAsync(string? userName = null)
-    {
-        var query = _context.ServiceRequests
+        return _context.ServiceRequests
             .AsNoTracking()
             .Include(sr => sr.RaisedByUser)
-            .ThenInclude(u => u!.Role)
+                .ThenInclude(u => u!.Role)
             .Include(sr => sr.Status)
-            .AsQueryable();
-
-        if (!string.IsNullOrWhiteSpace(userName))
-        {
-            query = query.Where(sr => sr.RaisedBy == userName);
-        }
-
-        return await query.OrderByDescending(sr => sr.RaisedOn).ToListAsync();
+            .OrderByDescending(sr => sr.RaisedOn)
+            .ToList();
     }
 
-    public async Task<ServiceRequest?> GetRequestByIdAsync(int requestId)
+    public List<ServiceRequest> ViewRequests(string userName)
     {
-        return await _context.ServiceRequests
+        return _context.ServiceRequests
             .AsNoTracking()
             .Include(sr => sr.RaisedByUser)
-            .ThenInclude(u => u!.Role)
+                .ThenInclude(u => u!.Role)
             .Include(sr => sr.Status)
-            .FirstOrDefaultAsync(sr => sr.RequestId == requestId);
+            .Where(sr => sr.RaisedBy == userName)
+            .OrderByDescending(sr => sr.RaisedOn)
+            .ToList();
     }
 
-    public async Task<bool> ReOpenRequestAsync(int requestId)
+    public int RaiseRequest(ServiceRequest newRequest)
     {
-        var request = await _context.ServiceRequests.FindAsync(requestId);
-        if (request is null)
+        newRequest.RaisedOn = DateTime.UtcNow;
+        if (newRequest.ReqStatus == 0)
+        {
+            newRequest.ReqStatus = 1;
+        }
+
+        _context.ServiceRequests.Add(newRequest);
+        _context.SaveChanges();
+        return newRequest.RequestId;
+    }
+
+    public ServiceRequest? GetRequestById(int requestId)
+    {
+        return _context.ServiceRequests
+            .AsNoTracking()
+            .Include(sr => sr.RaisedByUser)
+                .ThenInclude(u => u!.Role)
+            .Include(sr => sr.Status)
+            .FirstOrDefault(sr => sr.RequestId == requestId);
+    }
+
+    public bool ReOpenRequest(ServiceRequest request)
+    {
+        var existing = _context.ServiceRequests.Find(request.RequestId);
+        if (existing is null)
         {
             return false;
         }
 
-        request.ReqStatus = 4;
-        await _context.SaveChangesAsync();
+        existing.ReqStatus = 4;
+        _context.SaveChanges();
         return true;
     }
 
-    public async Task<bool> CloseRequestAsync(int requestId)
+    public List<ServiceRequest> GetRequestBySP(string userName)
     {
-        var request = await _context.ServiceRequests.FindAsync(requestId);
+        return _context.ServiceRequests
+            .FromSqlInterpolated($"SELECT * FROM ServiceRequest WHERE RaisedBy = {userName}")
+            .AsNoTracking()
+            .ToList();
+    }
+
+    public bool CloseRequest(int requestId)
+    {
+        var request = _context.ServiceRequests.Find(requestId);
         if (request is null)
         {
             return false;
         }
 
         request.ReqStatus = 3;
-        await _context.SaveChangesAsync();
+        _context.SaveChanges();
         return true;
     }
 
-    public async Task<bool> DeleteRequestAsync(int requestId)
+    public bool DeleteRequest(int requestId)
     {
-        var request = await _context.ServiceRequests.FindAsync(requestId);
+        var request = _context.ServiceRequests.Find(requestId);
         if (request is null)
         {
             return false;
         }
 
         _context.ServiceRequests.Remove(request);
-        await _context.SaveChangesAsync();
+        _context.SaveChanges();
         return true;
+    }
+
+    public User? GetUser(string userName)
+    {
+        return _context.Users
+            .AsNoTracking()
+            .Include(u => u.Role)
+            .FirstOrDefault(u => u.UserName == userName);
     }
 
     public async Task<Dictionary<string, int>> GetSummaryRequestByUserAsync(string userName)
@@ -150,6 +166,7 @@ public class Repository : IRepository
 // ============================================================================
 using Capstone.DAL.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Design;
 
 namespace Capstone.DAL.Repository;
 
@@ -160,10 +177,22 @@ public class HelpDeskDbContext : DbContext
     {
     }
 
-    public DbSet<Role> Roles => Set<Role>();
-    public DbSet<User> Users => Set<User>();
-    public DbSet<Status> Statuses => Set<Status>();
-    public DbSet<ServiceRequest> ServiceRequests => Set<ServiceRequest>();
+    public class HelpDeskDbContextFactory : IDesignTimeDbContextFactory<HelpDeskDbContext>
+    {
+        public HelpDeskDbContext CreateDbContext(string[] args)
+        {
+            var options = new DbContextOptionsBuilder<HelpDeskDbContext>()
+                .UseSqlite(@"Data Source=Database\ServiceDeskDB.db")
+                .Options;
+
+            return new HelpDeskDbContext(options);
+        }
+    }
+
+    public DbSet<Role> Roles { get; set; }
+    public DbSet<User> Users { get; set; }
+    public DbSet<ServiceRequest> ServiceRequests { get; set; }
+    public DbSet<Status> Statuses { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -176,19 +205,19 @@ public class HelpDeskDbContext : DbContext
 
         modelBuilder.Entity<User>()
             .HasOne(u => u.Role)
-            .WithMany(r => r.Users)
+            .WithMany()
             .HasForeignKey(u => u.RoleId)
             .OnDelete(DeleteBehavior.Restrict);
 
         modelBuilder.Entity<ServiceRequest>()
             .HasOne(sr => sr.RaisedByUser)
-            .WithMany(u => u.ServiceRequests)
+            .WithMany()
             .HasForeignKey(sr => sr.RaisedBy)
             .OnDelete(DeleteBehavior.Restrict);
 
         modelBuilder.Entity<ServiceRequest>()
             .HasOne(sr => sr.Status)
-            .WithMany(s => s.ServiceRequests)
+            .WithMany()
             .HasForeignKey(sr => sr.ReqStatus)
             .OnDelete(DeleteBehavior.Restrict);
 
@@ -207,7 +236,7 @@ public class HelpDeskDbContext : DbContext
 }
 
 // ============================================================================
-// FILE 1: tests/Capstone.DAL.Tests/Repository/HelpDeskDbContextTests.cs
+// FILE 4: tests/Capstone.DAL.Tests/Repository/HelpDeskDbContextTests.cs
 // ============================================================================
 using Capstone.DAL.Models;
 using Capstone.DAL.Repository;
@@ -298,14 +327,17 @@ public sealed class HelpDeskDbContextTests : IDisposable
     [Fact]
     public async Task SaveChangesAsync_WhenDeletingReferencedRole_ShouldThrowDbUpdateExceptionDueToRestrict()
     {
-        _context.Users.Add(new User
+        User user = new()
         {
             UserName = "bob",
             Password = "Password123",
             CreatedOn = DateTime.UtcNow,
             RoleId = 2
-        });
+        };
+        _context.Users.Add(user);
         await _context.SaveChangesAsync();
+
+        _context.Entry(user).State = EntityState.Detached;
 
         Role role = await _context.Roles.FirstAsync(r => r.RoleId == 2);
         _context.Roles.Remove(role);
@@ -321,7 +353,7 @@ public sealed class HelpDeskDbContextTests : IDisposable
 }
 
 // ============================================================================
-// FILE 2: tests/Capstone.DAL.Tests/Repository/RepositoryTests.cs
+// FILE 5: tests/Capstone.DAL.Tests/Repository/RepositoryTests.cs
 // ============================================================================
 using Capstone.DAL.Models;
 using Capstone.DAL.Repository;
@@ -370,9 +402,9 @@ public sealed class RepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task AuthenticateAsync_WithValidCredentials_ShouldReturnTrue()
+    public void Authenticate_WithValidCredentials_ShouldReturnTrue()
     {
-        bool result = await _repository.AuthenticateAsync(new User
+        bool result = _repository.Authenticate(new User
         {
             UserName = "alice",
             Password = "Password123"
@@ -386,9 +418,9 @@ public sealed class RepositoryTests : IDisposable
     [InlineData("unknown_user", "Password123")]
     [InlineData("", "Password123")]
     [InlineData("alice", "")]
-    public async Task AuthenticateAsync_WithInvalidOrMissingCredentials_ShouldReturnFalse(string userName, string password)
+    public void Authenticate_WithInvalidOrMissingCredentials_ShouldReturnFalse(string userName, string password)
     {
-        bool result = await _repository.AuthenticateAsync(new User
+        bool result = _repository.Authenticate(new User
         {
             UserName = userName,
             Password = password
@@ -398,9 +430,9 @@ public sealed class RepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task GetUserAsync_WhenUserExists_ShouldReturnUserWithRoleNavigation()
+    public void GetUser_WhenUserExists_ShouldReturnUserWithRoleNavigation()
     {
-        User? user = await _repository.GetUserAsync("admin");
+        User? user = _repository.GetUser("admin");
 
         Assert.NotNull(user);
         Assert.Equal("admin", user!.UserName);
@@ -408,33 +440,37 @@ public sealed class RepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task GetUserAsync_WhenUserDoesNotExist_ShouldReturnNull()
+    public void GetUser_WhenUserDoesNotExist_ShouldReturnNull()
     {
-        User? user = await _repository.GetUserAsync("does_not_exist");
+        User? user = _repository.GetUser("does_not_exist");
 
         Assert.Null(user);
     }
 
     [Fact]
-    public async Task RaiseRequestAsync_ShouldDefaultStatusToOpenAndAssignId()
+    public void RaiseRequest_ShouldDefaultStatusToOpenAndReturnNewId()
     {
-        ServiceRequest created = await _repository.RaiseRequestAsync(new ServiceRequest
+        ServiceRequest request = new()
         {
             Description = "Monitor replacement",
             Details = "Flickering display on secondary monitor",
             RaisedBy = "alice",
             Justification = "Daily development work"
-        });
+        };
 
-        Assert.True(created.RequestId > 0);
-        Assert.Equal(1, created.ReqStatus);
-        Assert.NotEqual(default, created.RaisedOn);
+        int createdId = _repository.RaiseRequest(request);
+        ServiceRequest? loaded = _repository.GetRequestById(createdId);
+
+        Assert.True(createdId > 0);
+        Assert.NotNull(loaded);
+        Assert.Equal(1, loaded!.ReqStatus);
+        Assert.NotEqual(default, loaded.RaisedOn);
     }
 
     [Fact]
-    public async Task ViewRequestsAsync_ShouldFilterByUserNameWhenProvidedOrReturnAll()
+    public void ViewRequests_ShouldReturnAllOrFilterByUserName()
     {
-        await _repository.RaiseRequestAsync(new ServiceRequest
+        _repository.RaiseRequest(new ServiceRequest
         {
             Description = "Alice request",
             Details = "Details for Alice",
@@ -442,7 +478,7 @@ public sealed class RepositoryTests : IDisposable
             Justification = "Work"
         });
 
-        await _repository.RaiseRequestAsync(new ServiceRequest
+        _repository.RaiseRequest(new ServiceRequest
         {
             Description = "Admin request",
             Details = "Details for Admin",
@@ -450,8 +486,8 @@ public sealed class RepositoryTests : IDisposable
             Justification = "Operations"
         });
 
-        List<ServiceRequest> allRequests = (await _repository.ViewRequestsAsync()).ToList();
-        List<ServiceRequest> aliceRequests = (await _repository.ViewRequestsAsync("alice")).ToList();
+        List<ServiceRequest> allRequests = _repository.ViewRequests();
+        List<ServiceRequest> aliceRequests = _repository.ViewRequests("alice");
 
         Assert.Equal(2, allRequests.Count);
         Assert.Single(aliceRequests);
@@ -459,9 +495,34 @@ public sealed class RepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task CloseAndReOpenRequestAsync_ShouldUpdateStatusCodes()
+    public void GetRequestBySP_ShouldReturnRequestsForUser()
     {
-        ServiceRequest created = await _repository.RaiseRequestAsync(new ServiceRequest
+        _repository.RaiseRequest(new ServiceRequest
+        {
+            Description = "Alice ticket 1",
+            Details = "Details 1",
+            RaisedBy = "alice",
+            Justification = "Support"
+        });
+
+        _repository.RaiseRequest(new ServiceRequest
+        {
+            Description = "Admin ticket",
+            Details = "Details 2",
+            RaisedBy = "admin",
+            Justification = "Ops"
+        });
+
+        List<ServiceRequest> aliceRequests = _repository.GetRequestBySP("alice");
+
+        Assert.Single(aliceRequests);
+        Assert.Equal("alice", aliceRequests[0].RaisedBy);
+    }
+
+    [Fact]
+    public void CloseAndReOpenRequest_ShouldUpdateStatusCodes()
+    {
+        int createdId = _repository.RaiseRequest(new ServiceRequest
         {
             Description = "Access issue",
             Details = "Repo permission needed",
@@ -469,11 +530,11 @@ public sealed class RepositoryTests : IDisposable
             Justification = "Feature branch"
         });
 
-        bool closed = await _repository.CloseRequestAsync(created.RequestId);
-        ServiceRequest? afterClose = await _repository.GetRequestByIdAsync(created.RequestId);
+        bool closed = _repository.CloseRequest(createdId);
+        ServiceRequest? afterClose = _repository.GetRequestById(createdId);
 
-        bool reopened = await _repository.ReOpenRequestAsync(created.RequestId);
-        ServiceRequest? afterReopen = await _repository.GetRequestByIdAsync(created.RequestId);
+        bool reopened = _repository.ReOpenRequest(new ServiceRequest { RequestId = createdId });
+        ServiceRequest? afterReopen = _repository.GetRequestById(createdId);
 
         Assert.True(closed);
         Assert.Equal(3, afterClose?.ReqStatus);
@@ -484,7 +545,7 @@ public sealed class RepositoryTests : IDisposable
     [Fact]
     public async Task GetSummaryRequestByUserAsync_ShouldGroupCountsByStatusDescription()
     {
-        ServiceRequest first = await _repository.RaiseRequestAsync(new ServiceRequest
+        int firstId = _repository.RaiseRequest(new ServiceRequest
         {
             Description = "Request 1",
             Details = "First request",
@@ -492,7 +553,7 @@ public sealed class RepositoryTests : IDisposable
             Justification = "Task 1"
         });
 
-        ServiceRequest second = await _repository.RaiseRequestAsync(new ServiceRequest
+        int secondId = _repository.RaiseRequest(new ServiceRequest
         {
             Description = "Request 2",
             Details = "Second request",
@@ -500,8 +561,8 @@ public sealed class RepositoryTests : IDisposable
             Justification = "Task 2"
         });
 
-        await _repository.CloseRequestAsync(first.RequestId);
-        await _repository.ReOpenRequestAsync(second.RequestId);
+        _repository.CloseRequest(firstId);
+        _repository.ReOpenRequest(new ServiceRequest { RequestId = secondId });
 
         Dictionary<string, int> summary = await _repository.GetSummaryRequestByUserAsync("alice");
 
@@ -510,9 +571,9 @@ public sealed class RepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task DeleteRequestAsync_WhenRequestExists_ShouldRemoveRecord()
+    public void DeleteRequest_WhenRequestExists_ShouldRemoveRecord()
     {
-        ServiceRequest created = await _repository.RaiseRequestAsync(new ServiceRequest
+        int createdId = _repository.RaiseRequest(new ServiceRequest
         {
             Description = "Temporary ticket",
             Details = "To be deleted",
@@ -520,22 +581,22 @@ public sealed class RepositoryTests : IDisposable
             Justification = "Cleanup test"
         });
 
-        bool deleted = await _repository.DeleteRequestAsync(created.RequestId);
-        ServiceRequest? loaded = await _repository.GetRequestByIdAsync(created.RequestId);
+        bool deleted = _repository.DeleteRequest(createdId);
+        ServiceRequest? loaded = _repository.GetRequestById(createdId);
 
         Assert.True(deleted);
         Assert.Null(loaded);
     }
 
     [Fact]
-    public async Task MissingRequestId_ShouldReturnFalseForStateChangesAndDelete()
+    public void MissingRequestId_ShouldReturnFalseOrNullForOperations()
     {
         const int nonExistentId = 99999;
 
-        Assert.False(await _repository.CloseRequestAsync(nonExistentId));
-        Assert.False(await _repository.ReOpenRequestAsync(nonExistentId));
-        Assert.False(await _repository.DeleteRequestAsync(nonExistentId));
-        Assert.Null(await _repository.GetRequestByIdAsync(nonExistentId));
+        Assert.False(_repository.CloseRequest(nonExistentId));
+        Assert.False(_repository.ReOpenRequest(new ServiceRequest { RequestId = nonExistentId }));
+        Assert.False(_repository.DeleteRequest(nonExistentId));
+        Assert.Null(_repository.GetRequestById(nonExistentId));
     }
 
     public void Dispose()
@@ -543,93 +604,4 @@ public sealed class RepositoryTests : IDisposable
         _context.Dispose();
         _connection.Dispose();
     }
-}
-
-
----------------------------
-
-
-----------------------------
-
-using Capstone.DAL.Models;
-using Microsoft.EntityFrameworkCore;
-
-namespace Capstone.DAL.Repository;
-
-public class HelpDeskDbContext : DbContext
-{
-    public HelpDeskDbContext(DbContextOptions<HelpDeskDbContext> options)
-        : base(options)
-    {
-    }
-
-    public DbSet<Role> Roles => Set<Role>();
-    public DbSet<User> Users => Set<User>();
-    public DbSet<Status> Statuses => Set<Status>();
-    public DbSet<ServiceRequest> ServiceRequests => Set<ServiceRequest>();
-
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
-    {
-        base.OnModelCreating(modelBuilder);
-
-        modelBuilder.Entity<Role>().ToTable("Role");
-        modelBuilder.Entity<User>().ToTable("User");
-        modelBuilder.Entity<Status>().ToTable("Status");
-        modelBuilder.Entity<ServiceRequest>().ToTable("ServiceRequest");
-
-        modelBuilder.Entity<User>()
-            .HasOne(u => u.Role)
-            .WithMany()
-            .HasForeignKey(u => u.RoleId)
-            .OnDelete(DeleteBehavior.Restrict);
-
-        modelBuilder.Entity<ServiceRequest>()
-            .HasOne(sr => sr.RaisedByUser)
-            .WithMany()
-            .HasForeignKey(sr => sr.RaisedBy)
-            .OnDelete(DeleteBehavior.Restrict);
-
-        modelBuilder.Entity<ServiceRequest>()
-            .HasOne(sr => sr.Status)
-            .WithMany()
-            .HasForeignKey(sr => sr.ReqStatus)
-            .OnDelete(DeleteBehavior.Restrict);
-
-        modelBuilder.Entity<Role>().HasData(
-            new Role { RoleId = 1, RoleName = "Admin" },
-            new Role { RoleId = 2, RoleName = "User" }
-        );
-
-        modelBuilder.Entity<Status>().HasData(
-            new Status { StatusId = 1, Description = "Open" },
-            new Status { StatusId = 2, Description = "In Progress" },
-            new Status { StatusId = 3, Description = "Closed" },
-            new Status { StatusId = 4, Description = "Re-Opened" }
-        );
-    }
-}
-
-
------
-
-[Fact]
-public async Task SaveChangesAsync_WhenDeletingReferencedRole_ShouldThrowDbUpdateExceptionDueToRestrict()
-{
-    User user = new()
-    {
-        UserName = "bob",
-        Password = "Password123",
-        CreatedOn = DateTime.UtcNow,
-        RoleId = 2
-    };
-    _context.Users.Add(user);
-    await _context.SaveChangesAsync();
-
-    // Detach tracked user so EF Core sends DELETE to SQLite on SaveChangesAsync
-    _context.Entry(user).State = EntityState.Detached;
-
-    Role role = await _context.Roles.FirstAsync(r => r.RoleId == 2);
-    _context.Roles.Remove(role);
-
-    await Assert.ThrowsAsync<DbUpdateException>(() => _context.SaveChangesAsync());
 }
