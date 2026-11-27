@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -e
 
-# 1. Create GenericResponse folder and ResponseResult.cs
+# 1. Update Capstone.API/GenericResponse/ResponseResult.cs
 mkdir -p Capstone.API/GenericResponse
 cat << 'EOF' > Capstone.API/GenericResponse/ResponseResult.cs
 namespace Capstone.API.GenericResponse;
 
-public class GenericResponse<T>
+public class ResponseResult<T>
 {
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public T? Data { get; set; }
     public List<string>? Errors { get; set; }
 
-    public static GenericResponse<T> Ok(T? data, string message = "Request completed successfully.") => new()
+    public static ResponseResult<T> Ok(T? data, string message = "Request completed successfully.") => new()
     {
         Success = true,
         Message = message,
@@ -21,7 +21,7 @@ public class GenericResponse<T>
         Errors = null
     };
 
-    public static GenericResponse<T> Fail(string message, List<string>? errors = null) => new()
+    public static ResponseResult<T> Fail(string message, List<string>? errors = null) => new()
     {
         Success = false,
         Message = message,
@@ -31,7 +31,7 @@ public class GenericResponse<T>
 }
 EOF
 
-# 2. Create Middleware folder and ExceptionHandlingMiddleware.cs
+# 2. Update Capstone.API/Middleware/ExceptionHandlingMiddleware.cs
 mkdir -p Capstone.API/Middleware
 cat << 'EOF' > Capstone.API/Middleware/ExceptionHandlingMiddleware.cs
 using System.Net;
@@ -83,7 +83,7 @@ public class ExceptionHandlingMiddleware
         context.Response.ContentType = "application/json";
         context.Response.StatusCode = (int)statusCode;
 
-        var response = GenericResponse<object>.Fail(
+        var response = ResponseResult<object>.Fail(
             message: message,
             errors: [exception.Message]);
 
@@ -93,125 +93,22 @@ public class ExceptionHandlingMiddleware
 }
 EOF
 
-# 3. Write Capstone.API/Program.cs with middleware registered
-cat << 'EOF' > Capstone.API/Program.cs
-using Capstone.API.Middleware;
-using Capstone.DAL;
-using Microsoft.EntityFrameworkCore;
+# 3. Create mirrored GenericResponse and Middleware test folders in Capstone.API.Tests
+mkdir -p Capstone.API.Tests/GenericResponse Capstone.API.Tests/Middleware
+rm -f Capstone.API.Tests/GenericResponseTests.cs Capstone.API.Tests/ExceptionHandlingMiddlewareTests.cs Capstone.API.Tests/UnitTest1.cs
 
-namespace Capstone.API;
-
-public partial class Program
-{
-    public static void Main(string[] args)
-    {
-        var builder = WebApplication.CreateBuilder(args);
-
-        var rawConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-            ?? throw new InvalidOperationException("Connection string 'DefaultConnection' was not found.");
-
-        var resolvedConnectionString = ResolveSqliteConnectionString(
-            rawConnectionString,
-            builder.Environment.ContentRootPath);
-
-        builder.Services.AddDbContext<HelpDeskDbContext>(options =>
-            options.UseSqlite(resolvedConnectionString));
-
-        builder.Services.AddScoped<IRepository, Repository>();
-
-        builder.Services.AddControllers();
-        builder.Services.AddEndpointsApiExplorer();
-        builder.Services.AddSwaggerGen();
-
-        var app = builder.Build();
-
-        app.UseMiddleware<ExceptionHandlingMiddleware>();
-
-        if (app.Environment.IsDevelopment())
-        {
-            app.UseSwagger();
-            app.UseSwaggerUI();
-        }
-
-        app.UseHttpsRedirection();
-
-        app.UseAuthorization();
-
-        app.MapControllers();
-
-        app.Run();
-    }
-
-    private static string ResolveSqliteConnectionString(string connectionString, string contentRootPath)
-    {
-        const string prefix = "Data Source=";
-        if (!connectionString.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-        {
-            return connectionString;
-        }
-
-        var dataSource = connectionString[prefix.Length..].Trim();
-        if (Path.IsPathRooted(dataSource))
-        {
-            return connectionString;
-        }
-
-        var fullPath = Path.GetFullPath(Path.Combine(contentRootPath, dataSource));
-        return $"{prefix}{fullPath}";
-    }
-}
-EOF
-
-# 4. Create Capstone.API.Tests project, add to solution, reference Capstone.API
-if [ ! -d "Capstone.API.Tests" ]; then
-    dotnet new xunit -n Capstone.API.Tests -f net9.0
-fi
-
-dotnet sln add Capstone.API.Tests/Capstone.API.Tests.csproj || true
-dotnet add Capstone.API.Tests/Capstone.API.Tests.csproj reference Capstone.API/Capstone.API.csproj
-
-cat << 'EOF' > Capstone.API.Tests/Capstone.API.Tests.csproj
-<Project Sdk="Microsoft.NET.Sdk">
-
-  <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <IsPackable>false</IsPackable>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <FrameworkReference Include="Microsoft.AspNetCore.App" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.2" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
-    <PackageReference Include="xunit" Version="2.9.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\Capstone.API\Capstone.API.csproj" />
-  </ItemGroup>
-
-</Project>
-EOF
-
-rm -f Capstone.API.Tests/UnitTest1.cs
-
-cat << 'EOF' > Capstone.API.Tests/GenericResponseTests.cs
+cat << 'EOF' > Capstone.API.Tests/GenericResponse/ResponseResultTests.cs
 using Capstone.API.GenericResponse;
 using Xunit;
 
-namespace Capstone.API.Tests;
+namespace Capstone.API.Tests.GenericResponse;
 
-public class GenericResponseTests
+public class ResponseResultTests
 {
     [Fact]
     public void Ok_SetsSuccessTrueAndPopulatesData()
     {
-        var response = GenericResponse<string>.Ok("Ticket #101", "Created successfully");
+        var response = ResponseResult<string>.Ok("Ticket #101", "Created successfully");
 
         Assert.True(response.Success);
         Assert.Equal("Created successfully", response.Message);
@@ -220,20 +117,42 @@ public class GenericResponseTests
     }
 
     [Fact]
+    public void Ok_UsesDefaultMessageWhenOmitted()
+    {
+        var response = ResponseResult<int>.Ok(42);
+
+        Assert.True(response.Success);
+        Assert.Equal("Request completed successfully.", response.Message);
+        Assert.Equal(42, response.Data);
+        Assert.Null(response.Errors);
+    }
+
+    [Fact]
     public void Fail_SetsSuccessFalseAndPopulatesErrors()
     {
         var errors = new List<string> { "Title is required." };
-        var response = GenericResponse<string>.Fail("Validation failed", errors);
+        var response = ResponseResult<string>.Fail("Validation failed", errors);
 
         Assert.False(response.Success);
         Assert.Equal("Validation failed", response.Message);
         Assert.Null(response.Data);
         Assert.Equal(errors, response.Errors);
     }
+
+    [Fact]
+    public void Fail_AllowsNullErrors()
+    {
+        var response = ResponseResult<object>.Fail("Not found");
+
+        Assert.False(response.Success);
+        Assert.Equal("Not found", response.Message);
+        Assert.Null(response.Data);
+        Assert.Null(response.Errors);
+    }
 }
 EOF
 
-cat << 'EOF' > Capstone.API.Tests/ExceptionHandlingMiddlewareTests.cs
+cat << 'EOF' > Capstone.API.Tests/Middleware/ExceptionHandlingMiddlewareTests.cs
 using System.Net;
 using System.Text.Json;
 using Capstone.API.GenericResponse;
@@ -242,7 +161,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
-namespace Capstone.API.Tests;
+namespace Capstone.API.Tests.Middleware;
 
 public class ExceptionHandlingMiddlewareTests
 {
@@ -274,7 +193,7 @@ public class ExceptionHandlingMiddlewareTests
     }
 
     [Fact]
-    public async Task InvokeAsync_WhenKeyNotFoundException_Returns404GenericResponse()
+    public async Task InvokeAsync_WhenKeyNotFoundException_Returns404ResponseResult()
     {
         var context = new DefaultHttpContext();
         context.Response.Body = new MemoryStream();
@@ -288,7 +207,7 @@ public class ExceptionHandlingMiddlewareTests
         Assert.Equal("application/json", context.Response.ContentType);
 
         context.Response.Body.Position = 0;
-        var payload = await JsonSerializer.DeserializeAsync<GenericResponse<object>>(context.Response.Body, JsonOptions);
+        var payload = await JsonSerializer.DeserializeAsync<ResponseResult<object>>(context.Response.Body, JsonOptions);
 
         Assert.NotNull(payload);
         Assert.False(payload.Success);
@@ -298,7 +217,7 @@ public class ExceptionHandlingMiddlewareTests
     }
 
     [Fact]
-    public async Task InvokeAsync_WhenArgumentException_Returns400GenericResponse()
+    public async Task InvokeAsync_WhenArgumentException_Returns400ResponseResult()
     {
         var context = new DefaultHttpContext();
         context.Response.Body = new MemoryStream();
@@ -312,15 +231,17 @@ public class ExceptionHandlingMiddlewareTests
         Assert.Equal("application/json", context.Response.ContentType);
 
         context.Response.Body.Position = 0;
-        var payload = await JsonSerializer.DeserializeAsync<GenericResponse<object>>(context.Response.Body, JsonOptions);
+        var payload = await JsonSerializer.DeserializeAsync<ResponseResult<object>>(context.Response.Body, JsonOptions);
 
         Assert.NotNull(payload);
         Assert.False(payload.Success);
         Assert.Equal("Invalid priority value.", payload.Message);
+        Assert.Null(payload.Data);
+        Assert.Contains("Invalid priority value.", payload.Errors!);
     }
 
     [Fact]
-    public async Task InvokeAsync_WhenUnhandledException_Returns500GenericResponse()
+    public async Task InvokeAsync_WhenUnhandledException_Returns500ResponseResult()
     {
         var context = new DefaultHttpContext();
         context.Response.Body = new MemoryStream();
@@ -334,7 +255,7 @@ public class ExceptionHandlingMiddlewareTests
         Assert.Equal("application/json", context.Response.ContentType);
 
         context.Response.Body.Position = 0;
-        var payload = await JsonSerializer.DeserializeAsync<GenericResponse<object>>(context.Response.Body, JsonOptions);
+        var payload = await JsonSerializer.DeserializeAsync<ResponseResult<object>>(context.Response.Body, JsonOptions);
 
         Assert.NotNull(payload);
         Assert.False(payload.Success);
@@ -345,6 +266,5 @@ public class ExceptionHandlingMiddlewareTests
 }
 EOF
 
-# 5. Build and run unit tests
-dotnet build
+# 4. Run tests
 dotnet test
