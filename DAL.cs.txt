@@ -8,7 +8,675 @@ using Capstone.API.DTOs.Summary;
 
 namespace Capstone.API.Services.Interfaces;
 
+public interface IRequestService// =========================================================
+// File: Services/Interfaces/IRequestService.cs
+// =========================================================
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Capstone.API.DTOs.ServiceRequest;
+using Capstone.API.DTOs.Summary;
+
+namespace Capstone.API.Services.Interfaces;
+
 public interface IRequestService
+{
+    IEnumerable<RequestListItemDto> GetRequests(string actingUserName);
+
+    ServiceRequestResponseDto? GetRequestById(int requestId, string actingUserName);
+
+    ServiceRequestResponseDto? CreateRequest(CreateServiceRequestDto dto, string actingUserName);
+
+    bool DeleteRequest(int requestId, string actingUserName);
+
+    ServiceRequestResponseDto? ReopenRequest(int requestId, string actingUserName);
+
+    ServiceRequestResponseDto? CloseRequest(int requestId, string actingUserName);
+
+    Task<SummaryDataDto?> GetUserSummaryAsync(string actingUserName, string? targetUserName = null);
+}
+
+// =============================================================
+// File: Services/Implementations/RequestService.cs
+// =============================================================
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Capstone.API.DTOs.ServiceRequest;
+using Capstone.API.DTOs.Summary;
+using Capstone.API.Services.Interfaces;
+using Capstone.DAL.Models;
+using Capstone.DAL.Repository;
+
+namespace Capstone.API.Services.Implementations;
+
+public class RequestService : IRequestService
+{
+    private readonly IRepository _repository;
+    private readonly IAuthenticationService _authService;
+
+    public RequestService(IRepository repository, IAuthenticationService authService)
+    {
+        _repository = repository;
+        _authService = authService;
+    }
+
+    public IEnumerable<RequestListItemDto> GetRequests(string actingUserName)
+    {
+        if (string.IsNullOrWhiteSpace(actingUserName) || _authService.GetUserProfile(actingUserName) is null)
+        {
+            return Enumerable.Empty<RequestListItemDto>();
+        }
+
+        var requests = _authService.IsAdmin(actingUserName)
+            ? _repository.ViewRequests()
+            : _repository.ViewRequests(actingUserName);
+
+        return requests.Select(ToListItemDto).ToList();
+    }
+
+    public ServiceRequestResponseDto? GetRequestById(int requestId, string actingUserName)
+    {
+        if (requestId <= 0 || string.IsNullOrWhiteSpace(actingUserName))
+        {
+            return null;
+        }
+
+        var request = _repository.GetRequestById(requestId);
+        if (request is null || !CanAccessRequest(request, actingUserName))
+        {
+            return null;
+        }
+
+        return ToResponseDto(request);
+    }
+
+    public ServiceRequestResponseDto? CreateRequest(CreateServiceRequestDto dto, string actingUserName)
+    {
+        if (dto is null || string.IsNullOrWhiteSpace(actingUserName) || _authService.GetUserProfile(actingUserName) is null)
+        {
+            return null;
+        }
+
+        var entity = new ServiceRequest
+        {
+            Description = dto.Description,
+            Details = dto.Details,
+            Justification = dto.Justification,
+            RaisedBy = actingUserName,
+            RaisedOn = DateTime.UtcNow,
+            ReqStatus = 1
+        };
+
+        var createdId = _repository.RaiseRequest(entity);
+        entity.RequestId = createdId;
+
+        return _repository.GetRequestById(createdId) is { } saved ? ToResponseDto(saved) : ToResponseDto(entity);
+    }
+
+    public bool DeleteRequest(int requestId, string actingUserName)
+    {
+        if (requestId <= 0 || string.IsNullOrWhiteSpace(actingUserName))
+        {
+            return false;
+        }
+
+        var request = _repository.GetRequestById(requestId);
+        if (request is null || !IsOwner(request, actingUserName))
+        {
+            return false;
+        }
+
+        return _repository.DeleteRequest(requestId);
+    }
+
+    public ServiceRequestResponseDto? ReopenRequest(int requestId, string actingUserName)
+    {
+        if (requestId <= 0 || string.IsNullOrWhiteSpace(actingUserName))
+        {
+            return null;
+        }
+
+        var request = _repository.GetRequestById(requestId);
+        if (request is null || !IsOwner(request, actingUserName))
+        {
+            return null;
+        }
+
+        if (!_repository.ReOpenRequest(request))
+        {
+            return null;
+        }
+
+        return _repository.GetRequestById(requestId) is { } updated ? ToResponseDto(updated) : ToResponseDto(new ServiceRequest
+        {
+            RequestId = request.RequestId,
+            Description = request.Description,
+            Details = request.Details,
+            RaisedBy = request.RaisedBy,
+            RaisedOn = request.RaisedOn,
+            Justification = request.Justification,
+            ReqStatus = 4,
+            Status = request.Status
+        });
+    }
+
+    public ServiceRequestResponseDto? CloseRequest(int requestId, string actingUserName)
+    {
+        if (requestId <= 0 || string.IsNullOrWhiteSpace(actingUserName) || !_authService.IsAdmin(actingUserName))
+        {
+            return null;
+        }
+
+        var request = _repository.GetRequestById(requestId);
+        if (request is null)
+        {
+            return null;
+        }
+
+        if (!_repository.CloseRequest(requestId))
+        {
+            return null;
+        }
+
+        return _repository.GetRequestById(requestId) is { } updated ? ToResponseDto(updated) : ToResponseDto(new ServiceRequest
+        {
+            RequestId = request.RequestId,
+            Description = request.Description,
+            Details = request.Details,
+            RaisedBy = request.RaisedBy,
+            RaisedOn = request.RaisedOn,
+            Justification = request.Justification,
+            ReqStatus = 3,
+            Status = request.Status
+        });
+    }
+
+    public async Task<SummaryDataDto?> GetUserSummaryAsync(string actingUserName, string? targetUserName = null)
+    {
+        if (string.IsNullOrWhiteSpace(actingUserName) || !_authService.IsAdmin(actingUserName))
+        {
+            return null;
+        }
+
+        var effectiveUser = string.IsNullOrWhiteSpace(targetUserName) ? actingUserName : targetUserName;
+        var summary = await _repository.GetSummaryRequestByUserAsync(effectiveUser);
+
+        return new SummaryDataDto
+        {
+            UserName = summary.UserName,
+            TotalRequests = summary.TotalRequests,
+            OpenRequests = summary.OpenRequests,
+            InProgressRequests = summary.InProgressRequests,
+            ClosedRequests = summary.ClosedRequests,
+            ReOpenedRequests = summary.ReOpenedRequests,
+            Requests = summary.Requests.Select(r => new RequestSummaryItemDto
+            {
+                RequestId = r.RequestId,
+                Description = r.Description,
+                Status = r.Status,
+                RaisedOn = r.RaisedOn
+            }).ToList()
+        };
+    }
+
+    private bool CanAccessRequest(ServiceRequest request, string actingUserName)
+    {
+        return _authService.IsAdmin(actingUserName) || IsOwner(request, actingUserName);
+    }
+
+    private static bool IsOwner(ServiceRequest request, string actingUserName)
+    {
+        return string.Equals(request.RaisedBy, actingUserName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static RequestListItemDto ToListItemDto(ServiceRequest request)
+    {
+        return new RequestListItemDto
+        {
+            RequestId = request.RequestId,
+            Description = request.Description,
+            RaisedBy = request.RaisedBy,
+            RaisedOn = request.RaisedOn,
+            StatusDescription = request.Status?.Description ?? GetStatusFallback(request.ReqStatus)
+        };
+    }
+
+    private static ServiceRequestResponseDto ToResponseDto(ServiceRequest request)
+    {
+        return new ServiceRequestResponseDto
+        {
+            RequestId = request.RequestId,
+            Description = request.Description,
+            Details = request.Details,
+            RaisedBy = request.RaisedBy,
+            RaisedOn = request.RaisedOn,
+            Justification = request.Justification,
+            ReqStatus = request.ReqStatus,
+            StatusDescription = request.Status?.Description ?? GetStatusFallback(request.ReqStatus)
+        };
+    }
+
+    private static string GetStatusFallback(int statusId)
+    {
+        return statusId switch
+        {
+            1 => "Open",
+            2 => "In Progress",
+            3 => "Closed",
+            4 => "Reopened",
+            _ => "Unknown"
+        };
+    }
+}
+
+// ==========================================
+// File: Program.cs (DI Registration Snippet)
+// ==========================================
+// Register after IRepository and IAuthenticationService:
+// builder.Services.AddScoped<IRequestService, RequestService>();
+
+// ======================================================
+// File: Capstone.API.Tests/Services/RequestServiceTests.cs
+// ======================================================
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Capstone.API.DTOs.ServiceRequest;
+using Capstone.API.DTOs.User;
+using Capstone.API.Services.Implementations;
+using Capstone.API.Services.Interfaces;
+using Capstone.DAL.DTOs;
+using Capstone.DAL.Models;
+using Capstone.DAL.Repository;
+using Moq;
+using Xunit;
+
+namespace Capstone.API.Tests.Services;
+
+public class RequestServiceTests
+{
+    private readonly Mock<IRepository> _repositoryMock = new();
+    private readonly Mock<IAuthenticationService> _authServiceMock = new();
+    private readonly RequestService _sut;
+
+    public RequestServiceTests()
+    {
+        _sut = new RequestService(_repositoryMock.Object, _authServiceMock.Object);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void GetRequests_BlankUser_ReturnsEmptyAndDoesNotQueryRepo(string userName)
+    {
+        var result = _sut.GetRequests(userName);
+
+        Assert.Empty(result);
+        _repositoryMock.Verify(r => r.ViewRequests(), Times.Never);
+        _repositoryMock.Verify(r => r.ViewRequests(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void GetRequests_UnknownUserProfile_ReturnsEmpty()
+    {
+        _authServiceMock.Setup(a => a.GetUserProfile("ghost")).Returns((UserResponseDto?)null);
+
+        var result = _sut.GetRequests("ghost");
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void GetRequests_Admin_CallsViewRequestsWithoutFilter()
+    {
+        _authServiceMock.Setup(a => a.GetUserProfile("admin1")).Returns(new UserResponseDto { UserName = "admin1", RoleName = "Admin" });
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.ViewRequests()).Returns(new List<ServiceRequest>
+        {
+            new() { RequestId = 1, Description = "VPN", RaisedBy = "alice", RaisedOn = DateTime.UtcNow, ReqStatus = 1, Status = new Status { StatusId = 1, Description = "Open" } },
+            new() { RequestId = 2, Description = "Mouse", RaisedBy = "bob", RaisedOn = DateTime.UtcNow, ReqStatus = 2 }
+        });
+
+        var result = _sut.GetRequests("admin1").ToList();
+
+        Assert.Equal(2, result.Count);
+        Assert.Equal("Open", result[0].StatusDescription);
+        Assert.Equal("In Progress", result[1].StatusDescription);
+        _repositoryMock.Verify(r => r.ViewRequests(), Times.Once);
+    }
+
+    [Fact]
+    public void GetRequests_NonAdmin_CallsViewRequestsForUser()
+    {
+        _authServiceMock.Setup(a => a.GetUserProfile("alice")).Returns(new UserResponseDto { UserName = "alice", RoleName = "User" });
+        _authServiceMock.Setup(a => a.IsAdmin("alice")).Returns(false);
+        _repositoryMock.Setup(r => r.ViewRequests("alice")).Returns(new List<ServiceRequest>
+        {
+            new() { RequestId = 3, Description = "Monitor", RaisedBy = "alice", RaisedOn = DateTime.UtcNow, ReqStatus = 99 }
+        });
+
+        var result = _sut.GetRequests("alice").ToList();
+
+        Assert.Single(result);
+        Assert.Equal("alice", result[0].RaisedBy);
+        Assert.Equal("Unknown", result[0].StatusDescription);
+        _repositoryMock.Verify(r => r.ViewRequests("alice"), Times.Once);
+    }
+
+    [Theory]
+    [InlineData(0, "alice")]
+    [InlineData(-1, "alice")]
+    [InlineData(1, "")]
+    public void GetRequestById_InvalidInputs_ReturnsNull(int requestId, string userName)
+    {
+        Assert.Null(_sut.GetRequestById(requestId, userName));
+    }
+
+    [Fact]
+    public void GetRequestById_NotFound_ReturnsNull()
+    {
+        _repositoryMock.Setup(r => r.GetRequestById(99)).Returns((ServiceRequest?)null);
+
+        Assert.Null(_sut.GetRequestById(99, "alice"));
+    }
+
+    [Fact]
+    public void GetRequestById_OwnerCaseInsensitive_ReturnsDto()
+    {
+        _repositoryMock.Setup(r => r.GetRequestById(10)).Returns(new ServiceRequest
+        {
+            RequestId = 10,
+            Description = "Email",
+            Details = "Mailbox",
+            Justification = "Work",
+            RaisedBy = "Alice",
+            RaisedOn = DateTime.UtcNow,
+            ReqStatus = 1
+        });
+        _authServiceMock.Setup(a => a.IsAdmin("alice")).Returns(false);
+
+        var dto = _sut.GetRequestById(10, "alice");
+
+        Assert.NotNull(dto);
+        Assert.Equal(10, dto!.RequestId);
+    }
+
+    [Fact]
+    public void GetRequestById_AdminAccessesAnyRequest_ReturnsDto()
+    {
+        _repositoryMock.Setup(r => r.GetRequestById(10)).Returns(new ServiceRequest
+        {
+            RequestId = 10,
+            Description = "Email",
+            Details = "Mailbox",
+            Justification = "Work",
+            RaisedBy = "alice",
+            RaisedOn = DateTime.UtcNow,
+            ReqStatus = 1
+        });
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+
+        var dto = _sut.GetRequestById(10, "admin1");
+
+        Assert.NotNull(dto);
+    }
+
+    [Fact]
+    public void GetRequestById_OtherNonAdmin_ReturnsNull()
+    {
+        _repositoryMock.Setup(r => r.GetRequestById(10)).Returns(new ServiceRequest
+        {
+            RequestId = 10,
+            Description = "Email",
+            RaisedBy = "alice",
+            ReqStatus = 1
+        });
+        _authServiceMock.Setup(a => a.IsAdmin("bob")).Returns(false);
+
+        Assert.Null(_sut.GetRequestById(10, "bob"));
+    }
+
+    [Fact]
+    public void CreateRequest_InvalidUserOrNullDto_ReturnsNull()
+    {
+        var dto = new CreateServiceRequestDto { Description = "Test", Details = "Details", Justification = "Just" };
+        _authServiceMock.Setup(a => a.GetUserProfile("ghost")).Returns((UserResponseDto?)null);
+
+        Assert.Null(_sut.CreateRequest(null!, "alice"));
+        Assert.Null(_sut.CreateRequest(dto, ""));
+        Assert.Null(_sut.CreateRequest(dto, "ghost"));
+    }
+
+    [Fact]
+    public void CreateRequest_ValidUser_RaisesRequestAndReturnsDto()
+    {
+        var dto = new CreateServiceRequestDto { Description = "Dock", Details = "USB-C dock", Justification = "Desk setup" };
+        var savedEntity = new ServiceRequest
+        {
+            RequestId = 7,
+            Description = "Dock",
+            Details = "USB-C dock",
+            Justification = "Desk setup",
+            RaisedBy = "alice",
+            RaisedOn = DateTime.UtcNow,
+            ReqStatus = 1,
+            Status = new Status { StatusId = 1, Description = "Open" }
+        };
+
+        _authServiceMock.Setup(a => a.GetUserProfile("alice")).Returns(new UserResponseDto { UserName = "alice", RoleName = "User" });
+        _repositoryMock.Setup(r => r.RaiseRequest(It.Is<ServiceRequest>(sr => sr.RaisedBy == "alice" && sr.ReqStatus == 1))).Returns(7);
+        _repositoryMock.Setup(r => r.GetRequestById(7)).Returns(savedEntity);
+
+        var result = _sut.CreateRequest(dto, "alice");
+
+        Assert.NotNull(result);
+        Assert.Equal(7, result!.RequestId);
+        Assert.Equal("alice", result.RaisedBy);
+        Assert.Equal("Open", result.StatusDescription);
+    }
+
+    [Fact]
+    public void CreateRequest_WhenGetRequestByIdAfterCreateReturnsNull_UsesEntityFallback()
+    {
+        var dto = new CreateServiceRequestDto { Description = "Dock", Details = "USB-C dock", Justification = "Desk setup" };
+        _authServiceMock.Setup(a => a.GetUserProfile("alice")).Returns(new UserResponseDto { UserName = "alice", RoleName = "User" });
+        _repositoryMock.Setup(r => r.RaiseRequest(It.IsAny<ServiceRequest>())).Returns(8);
+        _repositoryMock.Setup(r => r.GetRequestById(8)).Returns((ServiceRequest?)null);
+
+        var result = _sut.CreateRequest(dto, "alice");
+
+        Assert.NotNull(result);
+        Assert.Equal(8, result!.RequestId);
+        Assert.Equal("Open", result.StatusDescription);
+    }
+
+    [Theory]
+    [InlineData(0, "alice")]
+    [InlineData(1, "")]
+    public void DeleteRequest_InvalidInputs_ReturnsFalse(int requestId, string userName)
+    {
+        Assert.False(_sut.DeleteRequest(requestId, userName));
+    }
+
+    [Fact]
+    public void DeleteRequest_MissingOrNotOwnerOrRepoFails_HandledProperly()
+    {
+        _repositoryMock.Setup(r => r.GetRequestById(1)).Returns((ServiceRequest?)null);
+        Assert.False(_sut.DeleteRequest(1, "alice"));
+
+        _repositoryMock.Setup(r => r.GetRequestById(2)).Returns(new ServiceRequest { RequestId = 2, RaisedBy = "alice" });
+        Assert.False(_sut.DeleteRequest(2, "bob"));
+
+        _repositoryMock.Setup(r => r.DeleteRequest(2)).Returns(true);
+        Assert.True(_sut.DeleteRequest(2, "alice"));
+    }
+
+    [Theory]
+    [InlineData(0, "alice")]
+    [InlineData(1, "")]
+    public void ReopenRequest_InvalidInputs_ReturnsNull(int requestId, string userName)
+    {
+        Assert.Null(_sut.ReopenRequest(requestId, userName));
+    }
+
+    [Fact]
+    public void ReopenRequest_MissingOrNotOwnerOrRepoFails_ReturnsNull()
+    {
+        _repositoryMock.Setup(r => r.GetRequestById(1)).Returns((ServiceRequest?)null);
+        Assert.Null(_sut.ReopenRequest(1, "alice"));
+
+        _repositoryMock.Setup(r => r.GetRequestById(2)).Returns(new ServiceRequest { RequestId = 2, RaisedBy = "alice", ReqStatus = 3 });
+        Assert.Null(_sut.ReopenRequest(2, "bob"));
+
+        _repositoryMock.Setup(r => r.ReOpenRequest(It.IsAny<ServiceRequest>())).Returns(false);
+        Assert.Null(_sut.ReopenRequest(2, "alice"));
+    }
+
+    [Fact]
+    public void ReopenRequest_OwnerSucceeds_ReturnsReopenedDto()
+    {
+        var req = new ServiceRequest { RequestId = 2, Description = "VPN", Details = "Client", Justification = "Remote", RaisedBy = "alice", ReqStatus = 3 };
+        var updated = new ServiceRequest { RequestId = 2, Description = "VPN", Details = "Client", Justification = "Remote", RaisedBy = "alice", ReqStatus = 4, Status = new Status { StatusId = 4, Description = "Reopened" } };
+        var responses = new Queue<ServiceRequest?>(new[] { req, updated });
+
+        _repositoryMock.Setup(r => r.GetRequestById(2)).Returns(() => responses.Dequeue());
+        _repositoryMock.Setup(r => r.ReOpenRequest(req)).Returns(true);
+
+        var result = _sut.ReopenRequest(2, "alice");
+
+        Assert.NotNull(result);
+        Assert.Equal(4, result!.ReqStatus);
+        Assert.Equal("Reopened", result.StatusDescription);
+    }
+
+    [Fact]
+    public void ReopenRequest_WhenReloadAfterReopenIsNull_UsesFallback()
+    {
+        var req = new ServiceRequest { RequestId = 2, Description = "VPN", Details = "Client", Justification = "Remote", RaisedBy = "alice", ReqStatus = 3 };
+        var responses = new Queue<ServiceRequest?>(new ServiceRequest?[] { req, null });
+
+        _repositoryMock.Setup(r => r.GetRequestById(2)).Returns(() => responses.Dequeue());
+        _repositoryMock.Setup(r => r.ReOpenRequest(req)).Returns(true);
+
+        var result = _sut.ReopenRequest(2, "alice");
+
+        Assert.NotNull(result);
+        Assert.Equal(4, result!.ReqStatus);
+        Assert.Equal("Reopened", result.StatusDescription);
+    }
+
+    [Theory]
+    [InlineData(0, "admin1")]
+    [InlineData(1, "")]
+    public void CloseRequest_InvalidInputs_ReturnsNull(int requestId, string userName)
+    {
+        Assert.Null(_sut.CloseRequest(requestId, userName));
+    }
+
+    [Fact]
+    public void CloseRequest_NonAdminOrMissingOrRepoFails_ReturnsNull()
+    {
+        _authServiceMock.Setup(a => a.IsAdmin("alice")).Returns(false);
+        Assert.Null(_sut.CloseRequest(5, "alice"));
+
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetRequestById(5)).Returns((ServiceRequest?)null);
+        Assert.Null(_sut.CloseRequest(5, "admin1"));
+
+        var req = new ServiceRequest { RequestId = 5, RaisedBy = "alice", ReqStatus = 1 };
+        _repositoryMock.Setup(r => r.GetRequestById(5)).Returns(req);
+        _repositoryMock.Setup(r => r.CloseRequest(5)).Returns(false);
+        Assert.Null(_sut.CloseRequest(5, "admin1"));
+    }
+
+    [Fact]
+    public void CloseRequest_AdminSucceeds_ReturnsClosedDto()
+    {
+        var req = new ServiceRequest { RequestId = 5, Description = "Access", Details = "Git", Justification = "Dev", RaisedBy = "alice", ReqStatus = 1 };
+        var updated = new ServiceRequest { RequestId = 5, Description = "Access", Details = "Git", Justification = "Dev", RaisedBy = "alice", ReqStatus = 3, Status = new Status { StatusId = 3, Description = "Closed" } };
+        var responses = new Queue<ServiceRequest?>(new[] { req, updated });
+
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetRequestById(5)).Returns(() => responses.Dequeue());
+        _repositoryMock.Setup(r => r.CloseRequest(5)).Returns(true);
+
+        var result = _sut.CloseRequest(5, "admin1");
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result!.ReqStatus);
+        Assert.Equal("Closed", result.StatusDescription);
+    }
+
+    [Fact]
+    public void CloseRequest_WhenReloadAfterCloseIsNull_UsesFallback()
+    {
+        var req = new ServiceRequest { RequestId = 5, Description = "Access", Details = "Git", Justification = "Dev", RaisedBy = "alice", ReqStatus = 1 };
+        var responses = new Queue<ServiceRequest?>(new ServiceRequest?[] { req, null });
+
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetRequestById(5)).Returns(() => responses.Dequeue());
+        _repositoryMock.Setup(r => r.CloseRequest(5)).Returns(true);
+
+        var result = _sut.CloseRequest(5, "admin1");
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result!.ReqStatus);
+        Assert.Equal("Closed", result.StatusDescription);
+    }
+
+    [Fact]
+    public async Task GetUserSummaryAsync_NonAdminOrBlankActingUser_ReturnsNull()
+    {
+        Assert.Null(await _sut.GetUserSummaryAsync(""));
+        _authServiceMock.Setup(a => a.IsAdmin("alice")).Returns(false);
+        Assert.Null(await _sut.GetUserSummaryAsync("alice", "alice"));
+    }
+
+    [Fact]
+    public async Task GetUserSummaryAsync_Admin_QueriesTargetOrActingUserAndMapsDto()
+    {
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetSummaryRequestByUserAsync("alice")).ReturnsAsync(new SummaryResponse
+        {
+            UserName = "alice",
+            TotalRequests = 2,
+            OpenRequests = 1,
+            InProgressRequests = 0,
+            ClosedRequests = 1,
+            ReOpenedRequests = 0,
+            Requests = new List<RequestSummaryItem>
+            {
+                new() { RequestId = 1, Description = "VPN", Status = "Open", RaisedOn = DateTime.UtcNow }
+            }
+        });
+
+        var result = await _sut.GetUserSummaryAsync("admin1", "alice");
+
+        Assert.NotNull(result);
+        Assert.Equal("alice", result!.UserName);
+        Assert.Equal(2, result.TotalRequests);
+        Assert.Single(result.Requests);
+        _repositoryMock.Verify(r => r.GetSummaryRequestByUserAsync("alice"), Times.Once);
+    }
+
+    [Fact]
+    public async Task GetUserSummaryAsync_AdminWithNullTargetUser_DefaultsToActingUser()
+    {
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetSummaryRequestByUserAsync("admin1")).ReturnsAsync(new SummaryResponse
+        {
+            UserName = "admin1"
+        });
+
+        var result = await _sut.GetUserSummaryAsync("admin1", null);
+
+        Assert.NotNull(result);
+        Assert.Equal("admin1", result!.UserName);
+        _repositoryMock.Verify(r => r.GetSummaryRequestByUserAsync("admin1"), Times.Once);
+    }
+}
 {
     IEnumerable<RequestListItemDto> GetRequests(string actingUserName);
 
