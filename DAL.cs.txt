@@ -1,387 +1,275 @@
+{
+  "FoundryAgent": {
+    "ResourceGroup": "az-ITSRP-rg",
+    "Region": "East US",
+    "FoundryResource": "az-ITSRPFoundry",
+    "ModelDeployment": "gpt-4o",
+    "ProjectEndpoint": "",
+    "AgentId": "",
+    "Enabled": false
+  }
+}
+
+
+-----------------------------
+-----------------------------
+
+
+
+// =========================================================
+// File: Services/Interfaces/ISummaryService.cs
+// =========================================================
+using System.Threading.Tasks;
+using Capstone.API.DTOs.Summary;
+using Capstone.DAL.DTOs;
+
+namespace Capstone.API.Services.Interfaces;
+
+public interface ISummaryService
+{
+    Task<SummaryResponse?> GetUserSummaryAsync(string actingUserName, string? targetUserName = null);
+
+    Task<AISummaryResponseDto?> GetAISummaryAsync(string actingUserName, string? targetUserName = null);
+}
+
+// =============================================================
+// File: Services/Implementations/SummaryService.cs
+// =============================================================
+using System;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Capstone.API.DTOs.Summary;
+using Capstone.API.Services.Interfaces;
+using Capstone.DAL.DTOs;
+using Capstone.DAL.Repository;
+using Microsoft.Extensions.Configuration;
+
+namespace Capstone.API.Services.Implementations;
+
+public class SummaryService : ISummaryService
+{
+    private readonly IRepository _repository;
+    private readonly IAuthenticationService _authService;
+    private readonly IConfiguration? _configuration;
+
+    public SummaryService(
+        IRepository repository,
+        IAuthenticationService authService,
+        IConfiguration? configuration = null)
+    {
+        _repository = repository;
+        _authService = authService;
+        _configuration = configuration;
+    }
+
+    public async Task<SummaryResponse?> GetUserSummaryAsync(string actingUserName, string? targetUserName = null)
+    {
+        if (string.IsNullOrWhiteSpace(actingUserName) || !_authService.IsAdmin(actingUserName))
+        {
+            return null;
+        }
+
+        var effectiveUser = string.IsNullOrWhiteSpace(targetUserName) ? actingUserName : targetUserName;
+        return await _repository.GetSummaryRequestByUserAsync(effectiveUser);
+    }
+
+    public async Task<AISummaryResponseDto?> GetAISummaryAsync(string actingUserName, string? targetUserName = null)
+    {
+        var data = await GetUserSummaryAsync(actingUserName, targetUserName);
+        if (data is null)
+        {
+            return null;
+        }
+
+        var commonIssuesList = data.Requests
+            .Where(r => !string.IsNullOrWhiteSpace(r.Description))
+            .GroupBy(r => r.Description.Trim(), StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(g => g.Count())
+            .Take(3)
+            .Select(g => $"{g.Key} ({g.Count()})")
+            .ToList();
+
+        var commonIssues = commonIssuesList.Count > 0 ? string.Join(", ", commonIssuesList) : "None";
+        var scopeLabel = string.IsNullOrWhiteSpace(targetUserName)
+            ? $"user '{data.UserName}'"
+            : $"user '{targetUserName}'";
+
+        var overallSummary =
+            $"Summary for {scopeLabel}: {data.TotalRequests} total request(s), {data.OpenRequests} open, " +
+            $"{data.InProgressRequests} in progress, {data.ClosedRequests} closed, and {data.ReOpenedRequests} reopened.";
+
+        var recommendedActions = data.OpenRequests > 0 || data.ReOpenedRequests > 0
+            ? "Prioritize open and reopened service requests and verify pending items."
+            : "No open or reopened requests requiring immediate action.";
+
+        var tableMarkdown = await TryGenerateFoundryTableAsync(data)
+            ?? BuildSummaryTable(data, commonIssues, overallSummary, recommendedActions);
+
+        return new AISummaryResponseDto
+        {
+            TotalRequests = data.TotalRequests,
+            OpenRequests = data.OpenRequests,
+            ClosedRequests = data.ClosedRequests,
+            CommonIssues = commonIssues,
+            OverallSummary = $"{overallSummary}{Environment.NewLine}{Environment.NewLine}{tableMarkdown}",
+            RecommendedNextActions = recommendedActions
+        };
+    }
+
+    public string BuildAgentPrompt(SummaryResponse data)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Summarize the user's service requests in a Markdown table with these exact rows:");
+        sb.AppendLine("1. Total Requests");
+        sb.AppendLine("2. Open Requests");
+        sb.AppendLine("3. Close Requests");
+        sb.AppendLine("4. Common Issues");
+        sb.AppendLine("5. Overall Summary");
+        sb.AppendLine("6. Recommended Next Actions");
+        sb.AppendLine();
+        sb.AppendLine(JsonSerializer.Serialize(data));
+        return sb.ToString();
+    }
+
+    protected virtual Task<string?> InvokeFoundryAgentAsync(string prompt, SummaryResponse data)
+    {
+        // Replace with Azure.AI.Projects AIProjectClient + DefaultAzureCredential call
+        // once ProjectEndpoint and AgentId are populated in appsettings.json.
+        return Task.FromResult<string?>(null);
+    }
+
+    private async Task<string?> TryGenerateFoundryTableAsync(SummaryResponse data)
+    {
+        var enabled = _configuration?.GetValue<bool>("FoundryAgent:Enabled") ?? false;
+        var endpoint = _configuration?["FoundryAgent:ProjectEndpoint"];
+        var agentId = _configuration?["FoundryAgent:AgentId"];
+
+        if (!enabled || string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(agentId))
+        {
+            return null;
+        }
+
+        try
+        {
+            var prompt = BuildAgentPrompt(data);
+            var output = await InvokeFoundryAgentAsync(prompt, data);
+            return string.IsNullOrWhiteSpace(output) ? null : output.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string BuildSummaryTable(
+        SummaryResponse data,
+        string commonIssues,
+        string overallSummary,
+        string recommendedActions)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("| # | Metric | Value |");
+        sb.AppendLine("| --- | --- | --- |");
+        sb.AppendLine($"| 1 | Total Requests | {data.TotalRequests} |");
+        sb.AppendLine($"| 2 | Open Requests | {data.OpenRequests} |");
+        sb.AppendLine($"| 3 | Close Requests | {data.ClosedRequests} |");
+        sb.AppendLine($"| 4 | Common Issues | {EscapeCell(commonIssues)} |");
+        sb.AppendLine($"| 5 | Overall Summary | {EscapeCell(overallSummary)} |");
+        sb.Append($"| 6 | Recommended Next Actions | {EscapeCell(recommendedActions)} |");
+        return sb.ToString();
+    }
+
+    private static string EscapeCell(string value) =>
+        value.Replace("|", "\\|").Replace("\r", " ").Replace("\n", " ");
+}
+
+
+=====================================
+=====================================
+
+// ======================================================
+// File: Capstone.API.Tests/Services/SummaryServiceTests.cs
+// ======================================================
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading.Tasks;
-using Capstone.API.DTOs.ServiceRequest;
-using Capstone.API.DTOs.User;
 using Capstone.API.Services.Implementations;
 using Capstone.API.Services.Interfaces;
 using Capstone.DAL.DTOs;
-using Capstone.DAL.Models;
 using Capstone.DAL.Repository;
+using Microsoft.Extensions.Configuration;
 using Moq;
 using Xunit;
 
 namespace Capstone.API.Tests.Services;
 
-public class RequestServiceTests
+public class SummaryServiceTests
 {
     private readonly Mock<IRepository> _repositoryMock = new();
     private readonly Mock<IAuthenticationService> _authServiceMock = new();
-    private readonly RequestService _sut;
+    private readonly SummaryService _sut;
 
-    public RequestServiceTests()
+    public SummaryServiceTests()
     {
-        _sut = new RequestService(_repositoryMock.Object, _authServiceMock.Object);
+        _sut = new SummaryService(_repositoryMock.Object, _authServiceMock.Object);
     }
 
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    public void GetRequests_BlankUser_ReturnsEmptyAndDoesNotQueryRepo(string userName)
+    public async Task GetUserSummaryAsync_BlankActingUser_ReturnsNull(string actingUser)
     {
-        var result = _sut.GetRequests(userName);
+        var result = await _sut.GetUserSummaryAsync(actingUser);
 
-        Assert.Empty(result);
-        _repositoryMock.Verify(r => r.ViewRequests(), Times.Never);
-        _repositoryMock.Verify(r => r.ViewRequests(It.IsAny<string>()), Times.Never);
+        Assert.Null(result);
+        _repositoryMock.Verify(r => r.GetSummaryRequestByUserAsync(It.IsAny<string>()), Times.Never);
     }
 
     [Fact]
-    public void GetRequests_UnknownUserProfile_ReturnsEmpty()
+    public async Task GetUserSummaryAsync_NonAdmin_ReturnsNull()
     {
-        _authServiceMock.Setup(a => a.GetUserProfile("ghost")).Returns((UserResponseDto?)null);
-
-        var result = _sut.GetRequests("ghost");
-
-        Assert.Empty(result);
-    }
-
-    [Fact]
-    public void GetRequests_Admin_CallsViewRequestsWithoutFilter()
-    {
-        _authServiceMock.Setup(a => a.GetUserProfile("admin1")).Returns(new UserResponseDto { UserName = "admin1", RoleName = "Admin" });
-        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
-        _repositoryMock.Setup(r => r.ViewRequests()).Returns(new List<ServiceRequest>
-        {
-            new() { RequestId = 1, Description = "VPN", RaisedBy = "alice", RaisedOn = DateTime.UtcNow, ReqStatus = 1, Status = new Status { StatusId = 1, Description = "Open" } },
-            new() { RequestId = 2, Description = "Mouse", RaisedBy = "bob", RaisedOn = DateTime.UtcNow, ReqStatus = 2 }
-        });
-
-        var result = _sut.GetRequests("admin1").ToList();
-
-        Assert.Equal(2, result.Count);
-        Assert.Equal("Open", result[0].StatusDescription);
-        Assert.Equal("In Progress", result[1].StatusDescription);
-        _repositoryMock.Verify(r => r.ViewRequests(), Times.Once);
-    }
-
-    [Fact]
-    public void GetRequests_NonAdmin_CallsViewRequestsForUser()
-    {
-        _authServiceMock.Setup(a => a.GetUserProfile("alice")).Returns(new UserResponseDto { UserName = "alice", RoleName = "User" });
-        _authServiceMock.Setup(a => a.IsAdmin("alice")).Returns(false);
-        _repositoryMock.Setup(r => r.ViewRequests("alice")).Returns(new List<ServiceRequest>
-        {
-            new() { RequestId = 3, Description = "Monitor", RaisedBy = "alice", RaisedOn = DateTime.UtcNow, ReqStatus = 99 }
-        });
-
-        var result = _sut.GetRequests("alice").ToList();
-
-        Assert.Single(result);
-        Assert.Equal("alice", result[0].RaisedBy);
-        Assert.Equal("Unknown", result[0].StatusDescription);
-        _repositoryMock.Verify(r => r.ViewRequests("alice"), Times.Once);
-    }
-
-    [Theory]
-    [InlineData(0, "alice")]
-    [InlineData(-1, "alice")]
-    [InlineData(1, "")]
-    public void GetRequestById_InvalidInputs_ReturnsNull(int requestId, string userName)
-    {
-        Assert.Null(_sut.GetRequestById(requestId, userName));
-    }
-
-    [Fact]
-    public void GetRequestById_NotFound_ReturnsNull()
-    {
-        _repositoryMock.Setup(r => r.GetRequestById(99)).Returns((ServiceRequest?)null);
-
-        Assert.Null(_sut.GetRequestById(99, "alice"));
-    }
-
-    [Fact]
-    public void GetRequestById_OwnerCaseInsensitive_ReturnsDto()
-    {
-        _repositoryMock.Setup(r => r.GetRequestById(10)).Returns(new ServiceRequest
-        {
-            RequestId = 10,
-            Description = "Email",
-            Details = "Mailbox",
-            Justification = "Work",
-            RaisedBy = "Alice",
-            RaisedOn = DateTime.UtcNow,
-            ReqStatus = 1
-        });
         _authServiceMock.Setup(a => a.IsAdmin("alice")).Returns(false);
 
-        var dto = _sut.GetRequestById(10, "alice");
+        var result = await _sut.GetUserSummaryAsync("alice", "alice");
 
-        Assert.NotNull(dto);
-        Assert.Equal(10, dto!.RequestId);
+        Assert.Null(result);
+        _repositoryMock.Verify(r => r.GetSummaryRequestByUserAsync(It.IsAny<string>()), Times.Never);
     }
 
     [Fact]
-    public void GetRequestById_AdminAccessesAnyRequest_ReturnsDto()
+    public async Task GetUserSummaryAsync_AdminWithTargetUser_ReturnsDalSummaryResponse()
     {
-        _repositoryMock.Setup(r => r.GetRequestById(10)).Returns(new ServiceRequest
-        {
-            RequestId = 10,
-            Description = "Email",
-            Details = "Mailbox",
-            Justification = "Work",
-            RaisedBy = "alice",
-            RaisedOn = DateTime.UtcNow,
-            ReqStatus = 1
-        });
-        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
-
-        var dto = _sut.GetRequestById(10, "admin1");
-
-        Assert.NotNull(dto);
-    }
-
-    [Fact]
-    public void GetRequestById_OtherNonAdmin_ReturnsNull()
-    {
-        _repositoryMock.Setup(r => r.GetRequestById(10)).Returns(new ServiceRequest
-        {
-            RequestId = 10,
-            Description = "Email",
-            RaisedBy = "alice",
-            ReqStatus = 1
-        });
-        _authServiceMock.Setup(a => a.IsAdmin("bob")).Returns(false);
-
-        Assert.Null(_sut.GetRequestById(10, "bob"));
-    }
-
-    [Fact]
-    public void CreateRequest_InvalidUserOrNullDto_ReturnsNull()
-    {
-        var dto = new CreateServiceRequestDto { Description = "Test", Details = "Details", Justification = "Just" };
-        _authServiceMock.Setup(a => a.GetUserProfile("ghost")).Returns((UserResponseDto?)null);
-
-        Assert.Null(_sut.CreateRequest(null!, "alice"));
-        Assert.Null(_sut.CreateRequest(dto, ""));
-        Assert.Null(_sut.CreateRequest(dto, "ghost"));
-    }
-
-    [Fact]
-    public void CreateRequest_ValidUser_RaisesRequestAndReturnsDto()
-    {
-        var dto = new CreateServiceRequestDto { Description = "Dock", Details = "USB-C dock", Justification = "Desk setup" };
-        var savedEntity = new ServiceRequest
-        {
-            RequestId = 7,
-            Description = "Dock",
-            Details = "USB-C dock",
-            Justification = "Desk setup",
-            RaisedBy = "alice",
-            RaisedOn = DateTime.UtcNow,
-            ReqStatus = 1,
-            Status = new Status { StatusId = 1, Description = "Open" }
-        };
-
-        _authServiceMock.Setup(a => a.GetUserProfile("alice")).Returns(new UserResponseDto { UserName = "alice", RoleName = "User" });
-        _repositoryMock.Setup(r => r.RaiseRequest(It.Is<ServiceRequest>(sr => sr.RaisedBy == "alice" && sr.ReqStatus == 1))).Returns(7);
-        _repositoryMock.Setup(r => r.GetRequestById(7)).Returns(savedEntity);
-
-        var result = _sut.CreateRequest(dto, "alice");
-
-        Assert.NotNull(result);
-        Assert.Equal(7, result!.RequestId);
-        Assert.Equal("alice", result.RaisedBy);
-        Assert.Equal("Open", result.StatusDescription);
-    }
-
-    [Fact]
-    public void CreateRequest_WhenGetRequestByIdAfterCreateReturnsNull_UsesEntityFallback()
-    {
-        var dto = new CreateServiceRequestDto { Description = "Dock", Details = "USB-C dock", Justification = "Desk setup" };
-        _authServiceMock.Setup(a => a.GetUserProfile("alice")).Returns(new UserResponseDto { UserName = "alice", RoleName = "User" });
-        _repositoryMock.Setup(r => r.RaiseRequest(It.IsAny<ServiceRequest>())).Returns(8);
-        _repositoryMock.Setup(r => r.GetRequestById(8)).Returns((ServiceRequest?)null);
-
-        var result = _sut.CreateRequest(dto, "alice");
-
-        Assert.NotNull(result);
-        Assert.Equal(8, result!.RequestId);
-        Assert.Equal("Open", result.StatusDescription);
-    }
-
-    [Theory]
-    [InlineData(0, "alice")]
-    [InlineData(1, "")]
-    public void DeleteRequest_InvalidInputs_ReturnsFalse(int requestId, string userName)
-    {
-        Assert.False(_sut.DeleteRequest(requestId, userName));
-    }
-
-    [Fact]
-    public void DeleteRequest_MissingOrNotOwnerOrRepoFails_HandledProperly()
-    {
-        _repositoryMock.Setup(r => r.GetRequestById(1)).Returns((ServiceRequest?)null);
-        Assert.False(_sut.DeleteRequest(1, "alice"));
-
-        _repositoryMock.Setup(r => r.GetRequestById(2)).Returns(new ServiceRequest { RequestId = 2, RaisedBy = "alice" });
-        Assert.False(_sut.DeleteRequest(2, "bob"));
-
-        _repositoryMock.Setup(r => r.DeleteRequest(2)).Returns(true);
-        Assert.True(_sut.DeleteRequest(2, "alice"));
-    }
-
-    [Theory]
-    [InlineData(0, "alice")]
-    [InlineData(1, "")]
-    public void ReopenRequest_InvalidInputs_ReturnsNull(int requestId, string userName)
-    {
-        Assert.Null(_sut.ReopenRequest(requestId, userName));
-    }
-
-    [Fact]
-    public void ReopenRequest_MissingOrNotOwnerOrRepoFails_ReturnsNull()
-    {
-        _repositoryMock.Setup(r => r.GetRequestById(1)).Returns((ServiceRequest?)null);
-        Assert.Null(_sut.ReopenRequest(1, "alice"));
-
-        _repositoryMock.Setup(r => r.GetRequestById(2)).Returns(new ServiceRequest { RequestId = 2, RaisedBy = "alice", ReqStatus = 3 });
-        Assert.Null(_sut.ReopenRequest(2, "bob"));
-
-        _repositoryMock.Setup(r => r.ReOpenRequest(It.IsAny<ServiceRequest>())).Returns(false);
-        Assert.Null(_sut.ReopenRequest(2, "alice"));
-    }
-
-    [Fact]
-    public void ReopenRequest_OwnerSucceeds_ReturnsReopenedDto()
-    {
-        var req = new ServiceRequest { RequestId = 2, Description = "VPN", Details = "Client", Justification = "Remote", RaisedBy = "alice", ReqStatus = 3 };
-        var updated = new ServiceRequest { RequestId = 2, Description = "VPN", Details = "Client", Justification = "Remote", RaisedBy = "alice", ReqStatus = 4, Status = new Status { StatusId = 4, Description = "Reopened" } };
-        var responses = new Queue<ServiceRequest?>(new[] { req, updated });
-
-        _repositoryMock.Setup(r => r.GetRequestById(2)).Returns(() => responses.Dequeue());
-        _repositoryMock.Setup(r => r.ReOpenRequest(req)).Returns(true);
-
-        var result = _sut.ReopenRequest(2, "alice");
-
-        Assert.NotNull(result);
-        Assert.Equal(4, result!.ReqStatus);
-        Assert.Equal("Reopened", result.StatusDescription);
-    }
-
-    [Fact]
-    public void ReopenRequest_WhenReloadAfterReopenIsNull_UsesFallback()
-    {
-        var req = new ServiceRequest { RequestId = 2, Description = "VPN", Details = "Client", Justification = "Remote", RaisedBy = "alice", ReqStatus = 3 };
-        var responses = new Queue<ServiceRequest?>(new ServiceRequest?[] { req, null });
-
-        _repositoryMock.Setup(r => r.GetRequestById(2)).Returns(() => responses.Dequeue());
-        _repositoryMock.Setup(r => r.ReOpenRequest(req)).Returns(true);
-
-        var result = _sut.ReopenRequest(2, "alice");
-
-        Assert.NotNull(result);
-        Assert.Equal(4, result!.ReqStatus);
-        Assert.Equal("Reopened", result.StatusDescription);
-    }
-
-    [Theory]
-    [InlineData(0, "admin1")]
-    [InlineData(1, "")]
-    public void CloseRequest_InvalidInputs_ReturnsNull(int requestId, string userName)
-    {
-        Assert.Null(_sut.CloseRequest(requestId, userName));
-    }
-
-    [Fact]
-    public void CloseRequest_NonAdminOrMissingOrRepoFails_ReturnsNull()
-    {
-        _authServiceMock.Setup(a => a.IsAdmin("alice")).Returns(false);
-        Assert.Null(_sut.CloseRequest(5, "alice"));
-
-        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
-        _repositoryMock.Setup(r => r.GetRequestById(5)).Returns((ServiceRequest?)null);
-        Assert.Null(_sut.CloseRequest(5, "admin1"));
-
-        var req = new ServiceRequest { RequestId = 5, RaisedBy = "alice", ReqStatus = 1 };
-        _repositoryMock.Setup(r => r.GetRequestById(5)).Returns(req);
-        _repositoryMock.Setup(r => r.CloseRequest(5)).Returns(false);
-        Assert.Null(_sut.CloseRequest(5, "admin1"));
-    }
-
-    [Fact]
-    public void CloseRequest_AdminSucceeds_ReturnsClosedDto()
-    {
-        var req = new ServiceRequest { RequestId = 5, Description = "Access", Details = "Git", Justification = "Dev", RaisedBy = "alice", ReqStatus = 1 };
-        var updated = new ServiceRequest { RequestId = 5, Description = "Access", Details = "Git", Justification = "Dev", RaisedBy = "alice", ReqStatus = 3, Status = new Status { StatusId = 3, Description = "Closed" } };
-        var responses = new Queue<ServiceRequest?>(new[] { req, updated });
-
-        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
-        _repositoryMock.Setup(r => r.GetRequestById(5)).Returns(() => responses.Dequeue());
-        _repositoryMock.Setup(r => r.CloseRequest(5)).Returns(true);
-
-        var result = _sut.CloseRequest(5, "admin1");
-
-        Assert.NotNull(result);
-        Assert.Equal(3, result!.ReqStatus);
-        Assert.Equal("Closed", result.StatusDescription);
-    }
-
-    [Fact]
-    public void CloseRequest_WhenReloadAfterCloseIsNull_UsesFallback()
-    {
-        var req = new ServiceRequest { RequestId = 5, Description = "Access", Details = "Git", Justification = "Dev", RaisedBy = "alice", ReqStatus = 1 };
-        var responses = new Queue<ServiceRequest?>(new ServiceRequest?[] { req, null });
-
-        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
-        _repositoryMock.Setup(r => r.GetRequestById(5)).Returns(() => responses.Dequeue());
-        _repositoryMock.Setup(r => r.CloseRequest(5)).Returns(true);
-
-        var result = _sut.CloseRequest(5, "admin1");
-
-        Assert.NotNull(result);
-        Assert.Equal(3, result!.ReqStatus);
-        Assert.Equal("Closed", result.StatusDescription);
-    }
-
-    [Fact]
-    public async Task GetUserSummaryAsync_NonAdminOrBlankActingUser_ReturnsNull()
-    {
-        Assert.Null(await _sut.GetUserSummaryAsync(""));
-        _authServiceMock.Setup(a => a.IsAdmin("alice")).Returns(false);
-        Assert.Null(await _sut.GetUserSummaryAsync("alice", "alice"));
-    }
-
-    [Fact]
-    public async Task GetUserSummaryAsync_Admin_QueriesTargetOrActingUserAndMapsDto()
-    {
-        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
-        _repositoryMock.Setup(r => r.GetSummaryRequestByUserAsync("alice")).ReturnsAsync(new SummaryResponse
+        var raisedOn = new DateTime(2026, 2, 1, 9, 0, 0, DateTimeKind.Utc);
+        var expected = new SummaryResponse
         {
             UserName = "alice",
-            TotalRequests = 2,
+            TotalRequests = 3,
             OpenRequests = 1,
-            InProgressRequests = 0,
+            InProgressRequests = 1,
             ClosedRequests = 1,
             ReOpenedRequests = 0,
             Requests = new List<RequestSummaryItem>
             {
-                new() { RequestId = 1, Description = "VPN", Status = "Open", RaisedOn = DateTime.UtcNow }
+                new() { RequestId = 1, Description = "VPN access", Status = "Open", RaisedOn = raisedOn }
             }
-        });
+        };
+
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetSummaryRequestByUserAsync("alice")).ReturnsAsync(expected);
 
         var result = await _sut.GetUserSummaryAsync("admin1", "alice");
 
         Assert.NotNull(result);
         Assert.Equal("alice", result!.UserName);
-        Assert.Equal(2, result.TotalRequests);
+        Assert.Equal(3, result.TotalRequests);
         Assert.Single(result.Requests);
-        _repositoryMock.Verify(r => r.GetSummaryRequestByUserAsync("alice"), Times.Once);
+        Assert.Equal("VPN access", result.Requests[0].Description);
     }
 
     [Fact]
-    public async Task GetUserSummaryAsync_AdminWithNullTargetUser_DefaultsToActingUser()
+    public async Task GetUserSummaryAsync_AdminWithoutTargetUser_UsesActingUser()
     {
         _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
         _repositoryMock.Setup(r => r.GetSummaryRequestByUserAsync("admin1")).ReturnsAsync(new SummaryResponse
@@ -395,4 +283,187 @@ public class RequestServiceTests
         Assert.Equal("admin1", result!.UserName);
         _repositoryMock.Verify(r => r.GetSummaryRequestByUserAsync("admin1"), Times.Once);
     }
+
+    [Fact]
+    public async Task GetAISummaryAsync_NonAdmin_ReturnsNull()
+    {
+        _authServiceMock.Setup(a => a.IsAdmin("alice")).Returns(false);
+
+        var result = await _sut.GetAISummaryAsync("alice");
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task GetAISummaryAsync_WithOpenRequests_ComputesCommonIssuesTableAndAction()
+    {
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetSummaryRequestByUserAsync("alice")).ReturnsAsync(new SummaryResponse
+        {
+            UserName = "alice",
+            TotalRequests = 3,
+            OpenRequests = 2,
+            InProgressRequests = 0,
+            ClosedRequests = 1,
+            ReOpenedRequests = 0,
+            Requests = new List<RequestSummaryItem>
+            {
+                new() { RequestId = 1, Description = "VPN issue", Status = "Open", RaisedOn = DateTime.UtcNow },
+                new() { RequestId = 2, Description = "vpn issue", Status = "Open", RaisedOn = DateTime.UtcNow },
+                new() { RequestId = 3, Description = "Email", Status = "Closed", RaisedOn = DateTime.UtcNow }
+            }
+        });
+
+        var result = await _sut.GetAISummaryAsync("admin1", "alice");
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result!.TotalRequests);
+        Assert.Equal(2, result.OpenRequests);
+        Assert.Equal(1, result.ClosedRequests);
+        Assert.Contains("VPN issue (2)", result.CommonIssues);
+        Assert.Contains("| 1 | Total Requests | 3 |", result.OverallSummary);
+        Assert.Contains("| 2 | Open Requests | 2 |", result.OverallSummary);
+        Assert.Contains("| 3 | Close Requests | 1 |", result.OverallSummary);
+        Assert.Contains("| 4 | Common Issues |", result.OverallSummary);
+        Assert.Contains("| 5 | Overall Summary |", result.OverallSummary);
+        Assert.Contains("| 6 | Recommended Next Actions |", result.OverallSummary);
+        Assert.Contains("Prioritize open", result.RecommendedNextActions);
+    }
+
+    [Fact]
+    public async Task GetAISummaryAsync_NoOpenOrReopenedRequests_ReturnsIdleActionAndNoneIssues()
+    {
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetSummaryRequestByUserAsync("admin1")).ReturnsAsync(new SummaryResponse
+        {
+            UserName = "admin1",
+            TotalRequests = 1,
+            OpenRequests = 0,
+            InProgressRequests = 0,
+            ClosedRequests = 1,
+            ReOpenedRequests = 0,
+            Requests = new List<RequestSummaryItem>
+            {
+                new() { RequestId = 1, Description = "   ", Status = "Closed", RaisedOn = DateTime.UtcNow }
+            }
+        });
+
+        var result = await _sut.GetAISummaryAsync("admin1");
+
+        Assert.NotNull(result);
+        Assert.Equal("None", result!.CommonIssues);
+        Assert.Contains("No open or reopened", result.RecommendedNextActions);
+    }
+
+    [Fact]
+    public async Task GetAISummaryAsync_FoundryEnabledWithCustomHook_UsesAgentTable()
+    {
+        var customTable = "| Total Requests | Open Requests | Close Requests |\n| --- | --- | --- |\n| 2 | 1 | 1 |";
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["FoundryAgent:Enabled"] = "true",
+                ["FoundryAgent:ProjectEndpoint"] = "https://az-itsrpfoundry.services.ai.azure.com/api/projects/default",
+                ["FoundryAgent:AgentId"] = "agent-itsrp-01"
+            })
+            .Build();
+
+        var sut = new TestableFoundrySummaryService(
+            _repositoryMock.Object,
+            _authServiceMock.Object,
+            config,
+            (_, _) => Task.FromResult<string?>(customTable));
+
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetSummaryRequestByUserAsync("alice")).ReturnsAsync(new SummaryResponse
+        {
+            UserName = "alice",
+            TotalRequests = 2,
+            OpenRequests = 1,
+            ClosedRequests = 1
+        });
+
+        var result = await sut.GetAISummaryAsync("admin1", "alice");
+
+        Assert.NotNull(result);
+        Assert.Contains(customTable, result!.OverallSummary);
+    }
+
+    [Fact]
+    public async Task GetAISummaryAsync_FoundryEnabledWhenHookThrows_FallsBackToLocalTable()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["FoundryAgent:Enabled"] = "true",
+                ["FoundryAgent:ProjectEndpoint"] = "https://az-itsrpfoundry.services.ai.azure.com/api/projects/default",
+                ["FoundryAgent:AgentId"] = "agent-itsrp-01"
+            })
+            .Build();
+
+        var sut = new TestableFoundrySummaryService(
+            _repositoryMock.Object,
+            _authServiceMock.Object,
+            config,
+            (_, _) => throw new InvalidOperationException("Simulated Foundry timeout"));
+
+        _authServiceMock.Setup(a => a.IsAdmin("admin1")).Returns(true);
+        _repositoryMock.Setup(r => r.GetSummaryRequestByUserAsync("alice")).ReturnsAsync(new SummaryResponse
+        {
+            UserName = "alice",
+            TotalRequests = 1,
+            ClosedRequests = 1
+        });
+
+        var result = await sut.GetAISummaryAsync("admin1", "alice");
+
+        Assert.NotNull(result);
+        Assert.Contains("| 1 | Total Requests | 1 |", result!.OverallSummary);
+    }
+
+    [Fact]
+    public void BuildAgentPrompt_IncludesAllSixRequiredSectionsAndData()
+    {
+        var data = new SummaryResponse
+        {
+            UserName = "alice",
+            TotalRequests = 2,
+            OpenRequests = 1,
+            ClosedRequests = 1
+        };
+
+        var prompt = _sut.BuildAgentPrompt(data);
+
+        Assert.Contains("1. Total Requests", prompt);
+        Assert.Contains("2. Open Requests", prompt);
+        Assert.Contains("3. Close Requests", prompt);
+        Assert.Contains("4. Common Issues", prompt);
+        Assert.Contains("5. Overall Summary", prompt);
+        Assert.Contains("6. Recommended Next Actions", prompt);
+        Assert.Contains("alice", prompt);
+    }
+
+    private sealed class TestableFoundrySummaryService : SummaryService
+    {
+        private readonly Func<string, SummaryResponse, Task<string?>> _handler;
+
+        public TestableFoundrySummaryService(
+            IRepository repository,
+            IAuthenticationService authService,
+            IConfiguration configuration,
+            Func<string, SummaryResponse, Task<string?>> handler)
+            : base(repository, authService, configuration)
+        {
+            _handler = handler;
+        }
+
+        protected override Task<string?> InvokeFoundryAgentAsync(string prompt, SummaryResponse data)
+            => _handler(prompt, data);
+    }
 }
+
+
+===============================
+
+
+builder.Services.AddScoped<ISummaryService, SummaryService>();
