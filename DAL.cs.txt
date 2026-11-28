@@ -1,196 +1,210 @@
+// =========================================================
+// File: Services/Interfaces/IAuthenticationService.cs
+// =========================================================
+using Capstone.API.DTOs.Authentication;
+using Capstone.API.DTOs.User;
+
+namespace Capstone.API.Services.Interfaces;
+
+public interface IAuthenticationService
+{
+    LoginResponseDto? Login(LoginRequestDto request);
+
+    UserResponseDto? GetUserProfile(string userName);
+
+    bool IsAdmin(string userName);
+}
+
+// =============================================================
+// File: Services/Implementations/AuthenticationService.cs
+// =============================================================
+using System;
+using Capstone.API.DTOs.Authentication;
+using Capstone.API.DTOs.User;
+using Capstone.API.Services.Interfaces;
+using Capstone.DAL.Repository;
+
+namespace Capstone.API.Services.Implementations;
+
+public class AuthenticationService : IAuthenticationService
+{
+    private readonly IRepository _repository;
+
+    public AuthenticationService(IRepository repository)
+    {
+        _repository = repository;
+    }
+
+    public LoginResponseDto? Login(LoginRequestDto request)
+    {
+        if (string.IsNullOrWhiteSpace(request.UserName) || string.IsNullOrWhiteSpace(request.Password))
+        {
+            return null;
+        }
+
+        var user = _repository.GetUser(request.UserName);
+        if (user is null || user.Password != request.Password)
+        {
+            return null;
+        }
+
+        return new LoginResponseDto
+        {
+            Token = string.Empty,
+            UserName = user.UserName,
+            Role = user.Role?.RoleName ?? string.Empty,
+            ExpiresAt = DateTime.UtcNow.AddHours(2)
+        };
+    }
+
+    public UserResponseDto? GetUserProfile(string userName)
+    {
+        if (string.IsNullOrWhiteSpace(userName))
+        {
+            return null;
+        }
+
+        var user = _repository.GetUser(userName);
+        if (user is null)
+        {
+            return null;
+        }
+
+        return new UserResponseDto
+        {
+            UserName = user.UserName,
+            RoleId = user.RoleId,
+            RoleName = user.Role?.RoleName ?? string.Empty,
+            CreatedOn = user.CreatedOn
+        };
+    }
+
+    public bool IsAdmin(string userName)
+    {
+        if (string.IsNullOrWhiteSpace(userName))
+        {
+            return false;
+        }
+
+        var user = _repository.GetUser(userName);
+        return string.Equals(user?.Role?.RoleName, "Admin", StringComparison.OrdinalIgnoreCase);
+    }
+}
+
 // ==========================================
-// File: DTOs/Authentication/LoginRequestDto.cs
+// File: Program.cs (DI Registration Snippet)
 // ==========================================
-using System.ComponentModel.DataAnnotations;
+// Add this line where services are registered in Program.cs:
+// builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
 
-namespace Capstone.API.DTOs.Authentication;
-
-public class LoginRequestDto
-{
-    [Required]
-    [StringLength(20)]
-    public string UserName { get; set; } = string.Empty;
-
-    [Required]
-    [StringLength(20, MinimumLength = 8)]
-    public string Password { get; set; } = string.Empty;
-}
-
-// ===========================================
-// File: DTOs/Authentication/LoginResponseDto.cs
-// ===========================================
+// ======================================================
+// File: Capstone.API.Tests/Services/AuthenticationServiceTests.cs
+// ======================================================
 using System;
+using Capstone.API.DTOs.Authentication;
+using Capstone.API.Services.Implementations;
+using Capstone.DAL.Models;
+using Capstone.DAL.Repository;
+using Moq;
+using Xunit;
 
-namespace Capstone.API.DTOs.Authentication;
+namespace Capstone.API.Tests.Services;
 
-public class LoginResponseDto
+public class AuthenticationServiceTests
 {
-    public string Token { get; set; } = string.Empty;
+    private readonly Mock<IRepository> _repositoryMock = new();
+    private readonly AuthenticationService _sut;
 
-    public string UserName { get; set; } = string.Empty;
+    public AuthenticationServiceTests()
+    {
+        _sut = new AuthenticationService(_repositoryMock.Object);
+    }
 
-    public string Role { get; set; } = string.Empty;
+    [Fact]
+    public void Login_ValidCredentials_ReturnsLoginResponse()
+    {
+        var beforeCall = DateTime.UtcNow;
+        _repositoryMock.Setup(r => r.GetUser("alice")).Returns(new User
+        {
+            UserName = "alice",
+            Password = "Password123",
+            RoleId = 2,
+            Role = new Role { RoleId = 2, RoleName = "User" }
+        });
 
-    public DateTime ExpiresAt { get; set; }
-}
+        var result = _sut.Login(new LoginRequestDto
+        {
+            UserName = "alice",
+            Password = "Password123"
+        });
 
-// ====================================
-// File: DTOs/User/UserResponseDto.cs
-// ====================================
-using System;
+        Assert.NotNull(result);
+        Assert.Equal(string.Empty, result!.Token);
+        Assert.Equal("alice", result.UserName);
+        Assert.Equal("User", result.Role);
+        Assert.True(result.ExpiresAt > beforeCall);
+    }
 
-namespace Capstone.API.DTOs.User;
+    [Theory]
+    [InlineData("", "Password123")]
+    [InlineData("alice", "")]
+    [InlineData("alice", "WrongPass")]
+    public void Login_InvalidInputOrPassword_ReturnsNull(string userName, string password)
+    {
+        _repositoryMock.Setup(r => r.GetUser("alice")).Returns(new User
+        {
+            UserName = "alice",
+            Password = "Password123",
+            Role = new Role { RoleId = 2, RoleName = "User" }
+        });
 
-public class UserResponseDto
-{
-    public string UserName { get; set; } = string.Empty;
+        var result = _sut.Login(new LoginRequestDto
+        {
+            UserName = userName,
+            Password = password
+        });
 
-    public int RoleId { get; set; }
+        Assert.Null(result);
+    }
 
-    public string RoleName { get; set; } = string.Empty;
+    [Fact]
+    public void GetUserProfile_ExistingUser_ReturnsProfileWithoutPassword()
+    {
+        var createdOn = new DateTime(2026, 1, 10, 10, 0, 0, DateTimeKind.Utc);
+        _repositoryMock.Setup(r => r.GetUser("admin1")).Returns(new User
+        {
+            UserName = "admin1",
+            Password = "AdminPassword123",
+            RoleId = 1,
+            Role = new Role { RoleId = 1, RoleName = "Admin" },
+            CreatedOn = createdOn
+        });
 
-    public DateTime CreatedOn { get; set; }
-}
+        var profile = _sut.GetUserProfile("admin1");
 
-// ========================================================
-// File: DTOs/ServiceRequest/CreateServiceRequestDto.cs
-// ========================================================
-using System.ComponentModel.DataAnnotations;
+        Assert.NotNull(profile);
+        Assert.Equal("admin1", profile!.UserName);
+        Assert.Equal(1, profile.RoleId);
+        Assert.Equal("Admin", profile.RoleName);
+        Assert.Equal(createdOn, profile.CreatedOn);
+    }
 
-namespace Capstone.API.DTOs.ServiceRequest;
+    [Fact]
+    public void IsAdmin_AdminRole_ReturnsTrueAndNonAdmin_ReturnsFalse()
+    {
+        _repositoryMock.Setup(r => r.GetUser("admin1")).Returns(new User
+        {
+            UserName = "admin1",
+            Role = new Role { RoleId = 1, RoleName = "Admin" }
+        });
+        _repositoryMock.Setup(r => r.GetUser("user1")).Returns(new User
+        {
+            UserName = "user1",
+            Role = new Role { RoleId = 2, RoleName = "User" }
+        });
 
-public class CreateServiceRequestDto
-{
-    [Required]
-    [StringLength(50)]
-    public string Description { get; set; } = string.Empty;
-
-    [Required]
-    [StringLength(100)]
-    public string Details { get; set; } = string.Empty;
-
-    [Required]
-    [StringLength(50)]
-    public string Justification { get; set; } = string.Empty;
-}
-
-// ==========================================================
-// File: DTOs/ServiceRequest/ServiceRequestResponseDto.cs
-// ==========================================================
-using System;
-
-namespace Capstone.API.DTOs.ServiceRequest;
-
-public class ServiceRequestResponseDto
-{
-    public int RequestId { get; set; }
-
-    public string Description { get; set; } = string.Empty;
-
-    public string Details { get; set; } = string.Empty;
-
-    public string RaisedBy { get; set; } = string.Empty;
-
-    public DateTime RaisedOn { get; set; }
-
-    public string Justification { get; set; } = string.Empty;
-
-    public int ReqStatus { get; set; }
-
-    public string StatusDescription { get; set; } = string.Empty;
-}
-
-// ====================================================
-// File: DTOs/ServiceRequest/RequestListItemDto.cs
-// ====================================================
-using System;
-
-namespace Capstone.API.DTOs.ServiceRequest;
-
-public class RequestListItemDto
-{
-    public int RequestId { get; set; }
-
-    public string Description { get; set; } = string.Empty;
-
-    public string RaisedBy { get; set; } = string.Empty;
-
-    public DateTime RaisedOn { get; set; }
-
-    public string StatusDescription { get; set; } = string.Empty;
-}
-
-// ==========================================================
-// File: DTOs/ServiceRequest/ReopenServiceRequestDto.cs
-// ==========================================================
-using System.ComponentModel.DataAnnotations;
-
-namespace Capstone.API.DTOs.ServiceRequest;
-
-public class ReopenServiceRequestDto
-{
-    [Range(1, int.MaxValue)]
-    public int RequestId { get; set; }
-}
-
-// ================================================
-// File: DTOs/Summary/RequestSummaryItemDto.cs
-// ================================================
-using System;
-
-namespace Capstone.API.DTOs.Summary;
-
-public class RequestSummaryItemDto
-{
-    public int RequestId { get; set; }
-
-    public string Description { get; set; } = string.Empty;
-
-    public string Status { get; set; } = string.Empty;
-
-    public DateTime RaisedOn { get; set; }
-}
-
-// =========================================
-// File: DTOs/Summary/SummaryDataDto.cs
-// =========================================
-using System.Collections.Generic;
-
-namespace Capstone.API.DTOs.Summary;
-
-public class SummaryDataDto
-{
-    public string UserName { get; set; } = string.Empty;
-
-    public int TotalRequests { get; set; }
-
-    public int OpenRequests { get; set; }
-
-    public int InProgressRequests { get; set; }
-
-    public int ClosedRequests { get; set; }
-
-    public int ReOpenedRequests { get; set; }
-
-    public List<RequestSummaryItemDto> Requests { get; set; } = new();
-}
-
-// ================================================
-// File: DTOs/Summary/AISummaryResponseDto.cs
-// ================================================
-namespace Capstone.API.DTOs.Summary;
-
-public class AISummaryResponseDto
-{
-    public int TotalRequests { get; set; }
-
-    public int OpenRequests { get; set; }
-
-    public int ClosedRequests { get; set; }
-
-    public string CommonIssues { get; set; } = string.Empty;
-
-    public string OverallSummary { get; set; } = string.Empty;
-
-    public string RecommendedNextActions { get; set; } = string.Empty;
+        Assert.True(_sut.IsAdmin("admin1"));
+        Assert.False(_sut.IsAdmin("user1"));
+        Assert.False(_sut.IsAdmin("missing"));
+    }
 }
