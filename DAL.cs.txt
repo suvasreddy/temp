@@ -1,270 +1,196 @@
-#!/usr/bin/env bash
-set -e
+// ==========================================
+// File: DTOs/Authentication/LoginRequestDto.cs
+// ==========================================
+using System.ComponentModel.DataAnnotations;
 
-# 1. Update Capstone.API/GenericResponse/ResponseResult.cs
-mkdir -p Capstone.API/GenericResponse
-cat << 'EOF' > Capstone.API/GenericResponse/ResponseResult.cs
-namespace Capstone.API.GenericResponse;
+namespace Capstone.API.DTOs.Authentication;
 
-public class ResponseResult<T>
+public class LoginRequestDto
 {
-    public bool Success { get; set; }
-    public string Message { get; set; } = string.Empty;
-    public T? Data { get; set; }
-    public List<string>? Errors { get; set; }
+    [Required]
+    [StringLength(20)]
+    public string UserName { get; set; } = string.Empty;
 
-    public static ResponseResult<T> Ok(T? data, string message = "Request completed successfully.") => new()
-    {
-        Success = true,
-        Message = message,
-        Data = data,
-        Errors = null
-    };
-
-    public static ResponseResult<T> Fail(string message, List<string>? errors = null) => new()
-    {
-        Success = false,
-        Message = message,
-        Data = default,
-        Errors = errors
-    };
+    [Required]
+    [StringLength(20, MinimumLength = 8)]
+    public string Password { get; set; } = string.Empty;
 }
-EOF
 
-# 2. Update Capstone.API/Middleware/ExceptionHandlingMiddleware.cs
-mkdir -p Capstone.API/Middleware
-cat << 'EOF' > Capstone.API/Middleware/ExceptionHandlingMiddleware.cs
-using System.Net;
-using System.Text.Json;
-using Capstone.API.GenericResponse;
+// ===========================================
+// File: DTOs/Authentication/LoginResponseDto.cs
+// ===========================================
+using System;
 
-namespace Capstone.API.Middleware;
+namespace Capstone.API.DTOs.Authentication;
 
-public class ExceptionHandlingMiddleware
+public class LoginResponseDto
 {
-    private readonly RequestDelegate _next;
-    private readonly ILogger<ExceptionHandlingMiddleware> _logger;
+    public string Token { get; set; } = string.Empty;
 
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
+    public string UserName { get; set; } = string.Empty;
 
-    public ExceptionHandlingMiddleware(RequestDelegate next, ILogger<ExceptionHandlingMiddleware> logger)
-    {
-        _next = next;
-        _logger = logger;
-    }
+    public string Role { get; set; } = string.Empty;
 
-    public async Task InvokeAsync(HttpContext context)
-    {
-        try
-        {
-            await _next(context);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Unhandled exception occurred while processing {Method} {Path}",
-                context.Request.Method, context.Request.Path);
-
-            await HandleExceptionAsync(context, ex);
-        }
-    }
-
-    private static async Task HandleExceptionAsync(HttpContext context, Exception exception)
-    {
-        var (statusCode, message) = exception switch
-        {
-            KeyNotFoundException => (HttpStatusCode.NotFound, exception.Message),
-            ArgumentException => (HttpStatusCode.BadRequest, exception.Message),
-            _ => (HttpStatusCode.InternalServerError, "An unexpected error occurred while processing your request.")
-        };
-
-        context.Response.ContentType = "application/json";
-        context.Response.StatusCode = (int)statusCode;
-
-        var response = ResponseResult<object>.Fail(
-            message: message,
-            errors: [exception.Message]);
-
-        var json = JsonSerializer.Serialize(response, SerializerOptions);
-        await context.Response.WriteAsync(json);
-    }
+    public DateTime ExpiresAt { get; set; }
 }
-EOF
 
-# 3. Create mirrored GenericResponse and Middleware test folders in Capstone.API.Tests
-mkdir -p Capstone.API.Tests/GenericResponse Capstone.API.Tests/Middleware
-rm -f Capstone.API.Tests/GenericResponseTests.cs Capstone.API.Tests/ExceptionHandlingMiddlewareTests.cs Capstone.API.Tests/UnitTest1.cs
+// ====================================
+// File: DTOs/User/UserResponseDto.cs
+// ====================================
+using System;
 
-cat << 'EOF' > Capstone.API.Tests/GenericResponse/ResponseResultTests.cs
-using Capstone.API.GenericResponse;
-using Xunit;
+namespace Capstone.API.DTOs.User;
 
-namespace Capstone.API.Tests.GenericResponse;
-
-public class ResponseResultTests
+public class UserResponseDto
 {
-    [Fact]
-    public void Ok_SetsSuccessTrueAndPopulatesData()
-    {
-        var response = ResponseResult<string>.Ok("Ticket #101", "Created successfully");
+    public string UserName { get; set; } = string.Empty;
 
-        Assert.True(response.Success);
-        Assert.Equal("Created successfully", response.Message);
-        Assert.Equal("Ticket #101", response.Data);
-        Assert.Null(response.Errors);
-    }
+    public int RoleId { get; set; }
 
-    [Fact]
-    public void Ok_UsesDefaultMessageWhenOmitted()
-    {
-        var response = ResponseResult<int>.Ok(42);
+    public string RoleName { get; set; } = string.Empty;
 
-        Assert.True(response.Success);
-        Assert.Equal("Request completed successfully.", response.Message);
-        Assert.Equal(42, response.Data);
-        Assert.Null(response.Errors);
-    }
-
-    [Fact]
-    public void Fail_SetsSuccessFalseAndPopulatesErrors()
-    {
-        var errors = new List<string> { "Title is required." };
-        var response = ResponseResult<string>.Fail("Validation failed", errors);
-
-        Assert.False(response.Success);
-        Assert.Equal("Validation failed", response.Message);
-        Assert.Null(response.Data);
-        Assert.Equal(errors, response.Errors);
-    }
-
-    [Fact]
-    public void Fail_AllowsNullErrors()
-    {
-        var response = ResponseResult<object>.Fail("Not found");
-
-        Assert.False(response.Success);
-        Assert.Equal("Not found", response.Message);
-        Assert.Null(response.Data);
-        Assert.Null(response.Errors);
-    }
+    public DateTime CreatedOn { get; set; }
 }
-EOF
 
-cat << 'EOF' > Capstone.API.Tests/Middleware/ExceptionHandlingMiddlewareTests.cs
-using System.Net;
-using System.Text.Json;
-using Capstone.API.GenericResponse;
-using Capstone.API.Middleware;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
+// ========================================================
+// File: DTOs/ServiceRequest/CreateServiceRequestDto.cs
+// ========================================================
+using System.ComponentModel.DataAnnotations;
 
-namespace Capstone.API.Tests.Middleware;
+namespace Capstone.API.DTOs.ServiceRequest;
 
-public class ExceptionHandlingMiddlewareTests
+public class CreateServiceRequestDto
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
+    [Required]
+    [StringLength(50)]
+    public string Description { get; set; } = string.Empty;
 
-    [Fact]
-    public async Task InvokeAsync_WhenNoException_CallsNextAndKeepsResponse()
-    {
-        var context = new DefaultHttpContext();
-        context.Response.Body = new MemoryStream();
+    [Required]
+    [StringLength(100)]
+    public string Details { get; set; } = string.Empty;
 
-        RequestDelegate next = async ctx =>
-        {
-            ctx.Response.StatusCode = StatusCodes.Status200OK;
-            await ctx.Response.WriteAsync("ok");
-        };
-
-        var middleware = new ExceptionHandlingMiddleware(next, NullLogger<ExceptionHandlingMiddleware>.Instance);
-
-        await middleware.InvokeAsync(context);
-
-        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
-        context.Response.Body.Position = 0;
-        var body = await new StreamReader(context.Response.Body).ReadToEndAsync();
-        Assert.Equal("ok", body);
-    }
-
-    [Fact]
-    public async Task InvokeAsync_WhenKeyNotFoundException_Returns404ResponseResult()
-    {
-        var context = new DefaultHttpContext();
-        context.Response.Body = new MemoryStream();
-
-        RequestDelegate next = _ => throw new KeyNotFoundException("Ticket 42 not found.");
-        var middleware = new ExceptionHandlingMiddleware(next, NullLogger<ExceptionHandlingMiddleware>.Instance);
-
-        await middleware.InvokeAsync(context);
-
-        Assert.Equal((int)HttpStatusCode.NotFound, context.Response.StatusCode);
-        Assert.Equal("application/json", context.Response.ContentType);
-
-        context.Response.Body.Position = 0;
-        var payload = await JsonSerializer.DeserializeAsync<ResponseResult<object>>(context.Response.Body, JsonOptions);
-
-        Assert.NotNull(payload);
-        Assert.False(payload.Success);
-        Assert.Equal("Ticket 42 not found.", payload.Message);
-        Assert.Null(payload.Data);
-        Assert.Contains("Ticket 42 not found.", payload.Errors!);
-    }
-
-    [Fact]
-    public async Task InvokeAsync_WhenArgumentException_Returns400ResponseResult()
-    {
-        var context = new DefaultHttpContext();
-        context.Response.Body = new MemoryStream();
-
-        RequestDelegate next = _ => throw new ArgumentException("Invalid priority value.");
-        var middleware = new ExceptionHandlingMiddleware(next, NullLogger<ExceptionHandlingMiddleware>.Instance);
-
-        await middleware.InvokeAsync(context);
-
-        Assert.Equal((int)HttpStatusCode.BadRequest, context.Response.StatusCode);
-        Assert.Equal("application/json", context.Response.ContentType);
-
-        context.Response.Body.Position = 0;
-        var payload = await JsonSerializer.DeserializeAsync<ResponseResult<object>>(context.Response.Body, JsonOptions);
-
-        Assert.NotNull(payload);
-        Assert.False(payload.Success);
-        Assert.Equal("Invalid priority value.", payload.Message);
-        Assert.Null(payload.Data);
-        Assert.Contains("Invalid priority value.", payload.Errors!);
-    }
-
-    [Fact]
-    public async Task InvokeAsync_WhenUnhandledException_Returns500ResponseResult()
-    {
-        var context = new DefaultHttpContext();
-        context.Response.Body = new MemoryStream();
-
-        RequestDelegate next = _ => throw new InvalidOperationException("Database lock timeout.");
-        var middleware = new ExceptionHandlingMiddleware(next, NullLogger<ExceptionHandlingMiddleware>.Instance);
-
-        await middleware.InvokeAsync(context);
-
-        Assert.Equal((int)HttpStatusCode.InternalServerError, context.Response.StatusCode);
-        Assert.Equal("application/json", context.Response.ContentType);
-
-        context.Response.Body.Position = 0;
-        var payload = await JsonSerializer.DeserializeAsync<ResponseResult<object>>(context.Response.Body, JsonOptions);
-
-        Assert.NotNull(payload);
-        Assert.False(payload.Success);
-        Assert.Equal("An unexpected error occurred while processing your request.", payload.Message);
-        Assert.Null(payload.Data);
-        Assert.Contains("Database lock timeout.", payload.Errors!);
-    }
+    [Required]
+    [StringLength(50)]
+    public string Justification { get; set; } = string.Empty;
 }
-EOF
 
-# 4. Run tests
-dotnet test
+// ==========================================================
+// File: DTOs/ServiceRequest/ServiceRequestResponseDto.cs
+// ==========================================================
+using System;
+
+namespace Capstone.API.DTOs.ServiceRequest;
+
+public class ServiceRequestResponseDto
+{
+    public int RequestId { get; set; }
+
+    public string Description { get; set; } = string.Empty;
+
+    public string Details { get; set; } = string.Empty;
+
+    public string RaisedBy { get; set; } = string.Empty;
+
+    public DateTime RaisedOn { get; set; }
+
+    public string Justification { get; set; } = string.Empty;
+
+    public int ReqStatus { get; set; }
+
+    public string StatusDescription { get; set; } = string.Empty;
+}
+
+// ====================================================
+// File: DTOs/ServiceRequest/RequestListItemDto.cs
+// ====================================================
+using System;
+
+namespace Capstone.API.DTOs.ServiceRequest;
+
+public class RequestListItemDto
+{
+    public int RequestId { get; set; }
+
+    public string Description { get; set; } = string.Empty;
+
+    public string RaisedBy { get; set; } = string.Empty;
+
+    public DateTime RaisedOn { get; set; }
+
+    public string StatusDescription { get; set; } = string.Empty;
+}
+
+// ==========================================================
+// File: DTOs/ServiceRequest/ReopenServiceRequestDto.cs
+// ==========================================================
+using System.ComponentModel.DataAnnotations;
+
+namespace Capstone.API.DTOs.ServiceRequest;
+
+public class ReopenServiceRequestDto
+{
+    [Range(1, int.MaxValue)]
+    public int RequestId { get; set; }
+}
+
+// ================================================
+// File: DTOs/Summary/RequestSummaryItemDto.cs
+// ================================================
+using System;
+
+namespace Capstone.API.DTOs.Summary;
+
+public class RequestSummaryItemDto
+{
+    public int RequestId { get; set; }
+
+    public string Description { get; set; } = string.Empty;
+
+    public string Status { get; set; } = string.Empty;
+
+    public DateTime RaisedOn { get; set; }
+}
+
+// =========================================
+// File: DTOs/Summary/SummaryDataDto.cs
+// =========================================
+using System.Collections.Generic;
+
+namespace Capstone.API.DTOs.Summary;
+
+public class SummaryDataDto
+{
+    public string UserName { get; set; } = string.Empty;
+
+    public int TotalRequests { get; set; }
+
+    public int OpenRequests { get; set; }
+
+    public int InProgressRequests { get; set; }
+
+    public int ClosedRequests { get; set; }
+
+    public int ReOpenedRequests { get; set; }
+
+    public List<RequestSummaryItemDto> Requests { get; set; } = new();
+}
+
+// ================================================
+// File: DTOs/Summary/AISummaryResponseDto.cs
+// ================================================
+namespace Capstone.API.DTOs.Summary;
+
+public class AISummaryResponseDto
+{
+    public int TotalRequests { get; set; }
+
+    public int OpenRequests { get; set; }
+
+    public int ClosedRequests { get; set; }
+
+    public string CommonIssues { get; set; } = string.Empty;
+
+    public string OverallSummary { get; set; } = string.Empty;
+
+    public string RecommendedNextActions { get; set; } = string.Empty;
+}
